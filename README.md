@@ -8,7 +8,7 @@ they can navigate levels properly, use cover, flank, retreat, ambush, and work
 together — then plugs those policies into a playable engine so you can fight
 them.
 
-**Status:** early scaffold. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Status:** the headless simulator runs real Quake maps deterministically at over 100,000 ticks per second per core. Training comes next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## How it works
 
@@ -46,7 +46,21 @@ ctest --preset release
 
 uv sync                    # add --extra train for PyTorch
 uv run pytest
-uv run python -m deepquake.gamedata   # checks your game data
+uv run python -m deepquake.gamedata link /path/to/Quake/id1   # link your game data
+ctest --preset release     # now includes the tests that need game data
+uv run pytest
+```
+
+Try it:
+
+```python
+from deepquake import sim
+
+sim.init()
+sim.load_map("e1m1", skill=1, seed=0)
+for _ in range(72):  # one second of game time
+    sim.step(forward=400, yaw=90)
+print(sim.player())
 ```
 
 ## Trained models

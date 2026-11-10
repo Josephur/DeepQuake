@@ -14,14 +14,22 @@ M4 onward are created when that milestone starts.
 ## M1 — Headless simulator
 
 - [x] Choose engine base: QuakeSpasm (see ARCHITECTURE.md) (#2)
-- [ ] Vendor QuakeSpasm under `engine/third_party/quakespasm/` with `UPSTREAM.md` (#3)
-- [ ] Strip to server core; build with no SDL, GL, audio, or network (#4)
-- [ ] C API: create, load map, reset(seed), step, destroy (#5)
-- [ ] Seeded random numbers and fixed frame time (no wall clock) (#6)
-- [ ] Determinism test: same seed and inputs give identical state hashes (#7)
+- [x] Vendor QuakeSpasm under `engine/third_party/quakespasm/` with `UPSTREAM.md` (#3)
+- [x] Strip to server core; build with no SDL, GL, audio, or network (#4)
+- [x] C API: create, load map, reset(seed), step, destroy (#5)
+- [x] Seeded random numbers and fixed frame time (no wall clock) (#6)
+- [x] Determinism test: same seed and inputs give identical state hashes (#7)
 - [ ] Fidelity test: recorded player inputs replay to the same positions as the unmodified engine (#8)
 - [ ] Snapshot and restore (#9)
-- [ ] Throughput benchmark (ticks per second per core) recorded in this file (#10)
+- [x] Throughput benchmark (ticks per second per core) recorded in this file (#10)
+
+Throughput (2026-11-09, 24-thread desktop CPU, release build, 1/72 s ticks,
+`dqsim_bench gamedata <map> 20000 <processes>`, player running and firing):
+
+| Map | 1 process | 24 processes, total |
+| --- | --- | --- |
+| e1m1 | 114,000 ticks/s (1,580x real time) | 1,540,000 ticks/s |
+| e1m3 | not measured | 800,000 ticks/s |
 
 ## M2 — Environment
 

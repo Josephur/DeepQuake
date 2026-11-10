@@ -3,28 +3,30 @@
 Everything in this directory except this file is ignored by git and must stay
 that way. Quake's data files are copyrighted and cannot be redistributed.
 
-Place or symlink your `id1` directory here:
+The simulator needs the `id1` pak files, named in lower case:
 
 ```
 gamedata/
   id1/
     pak0.pak     shareware episode
-    pak1.pak     registered episodes (original release; the rerelease ships one pak0.pak)
+    pak1.pak     registered episodes
 ```
 
-For example:
+The easiest way is to let the tool create symlinks to your copy. It also
+fixes upper-case names (`PAK0.PAK`), which the engine cannot find on Linux:
 
 ```bash
-ln -s "/path/to/your/Quake/id1" gamedata/id1
-uv run python -m deepquake.gamedata
+uv run python -m deepquake.gamedata link "/path/to/your/Quake/id1"
 ```
 
-If you have the 2021 rerelease (Steam or GOG), prefer the original data it
-ships in `dos/id1` (`PAK0.PAK` and `PAK1.PAK`): that is the 1996 game with the
+Run `uv run python -m deepquake.gamedata` at any time to check what was found
+and whether it contains what the simulator needs.
+
+If you have the 2021 rerelease (Steam or GOG), link the original data it
+ships in `dos/id1` rather than its own `id1`: that is the 1996 game with the
 stock `progs.dat`, which is what the simulator is developed against. The
-rerelease's own `id1/pak0.pak` contains a newer `progs.dat` built for the KEX
+rerelease's `id1/pak0.pak` contains a newer `progs.dat` built for the KEX
 engine.
 
-The checker reports which paks were found and whether they contain what the
-simulator needs (`progs.dat` and the maps). To keep the data somewhere else,
-set `DEEPQUAKE_GAMEDATA` to a directory that contains `id1/`.
+To keep the data somewhere else entirely, set `DEEPQUAKE_GAMEDATA` to a
+directory that contains `id1/`.

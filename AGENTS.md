@@ -33,9 +33,11 @@ running at the player. Read `docs/ARCHITECTURE.md` for the design and
 ```
 engine/                 C. Headless simulator (libdqsim) and, later, the playable client
   include/dqsim/        Public C API — the only contract Python and tools depend on
-  src/                  Our code
+  src/                  Our code: API (dqsim.c), system layer, fake network, client stubs
+  src/shim/             Stand-ins for SDL and renderer headers that are not vendored
   tests/                C tests, run by ctest
-  third_party/          Vendored GPL engine source (added in M1), minimally patched
+  tools/                C programs built with the library (dqsim_bench)
+  third_party/quakespasm/  Vendored QuakeSpasm server code, unmodified; see its UPSTREAM.md
 python/deepquake/       Python package: sim bindings, environments, models, training
 python/tests/           pytest
 tools/                  Repo maintenance scripts (stdlib-only Python or POSIX sh)
@@ -55,17 +57,25 @@ empty placeholder directories or stub modules ahead of need.
 git config core.hooksPath .githooks       # once per clone
 
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev
+cmake --preset release && cmake --build --preset release && ctest --preset release
 uv sync                                    # add --extra train for PyTorch
 uv run ruff check . && uv run ruff format --check .
 uv run pytest
 python3 tools/check_repo_hygiene.py        # forbidden files, size limits
 uv run python -m deepquake.gamedata        # verify local game data is usable
+build/release/bin/dqsim_bench gamedata e1m1 20000 24   # simulator throughput
 ```
+
+Python loads the **release** build of the library first, so rebuild the
+release preset before running pytest after any engine change.
 
 CI (`.github/workflows/ci.yml`) runs the same commands with no game data and
 no GPU. Anything needing game data or a GPU must be a pytest test marked
-`gamedata` or `gpu`; those are deselected in CI and must skip cleanly when the
-resource is absent.
+`gamedata` or `gpu` (deselected in CI), or a ctest test that exits with code
+77 when the data is absent. Such tests must skip cleanly, never fail, when
+the resource is missing. Because CI cannot run them, **you must run them
+locally before closing any issue that touches `engine/`**, and say in the
+closing comment that you did.
 
 ## Work tracking: every change has a GitHub issue
 
@@ -100,8 +110,16 @@ The issue tracker is the project's history. Use the `gh` CLI.
 ## Conventions
 
 - **C**: C11, `-Wall -Wextra -Werror` for our code (not for `third_party/`).
-  Public symbols are prefixed `dqsim_`. Keep patches to vendored code small and
-  list each one in that directory's `UPSTREAM.md`.
+  Public symbols are prefixed `dqsim_`.
+- **Vendored engine code is unmodified.** When the engine needs to behave
+  differently, first try a stub in `engine/src/client_stubs.c`, a shim header
+  in `engine/src/shim/`, or a compile definition in `engine/CMakeLists.txt`.
+  Edit a vendored file only when none of those can work, mark the change with
+  a `// DeepQuake:` comment, and list it in `UPSTREAM.md`.
+- **One simulator per process.** The engine's state is global. Never try to
+  run two simulations in one process or call it from two threads; use worker
+  processes. `dqsim_init` can be called once per process, which is why Python
+  tests that run the engine do so in a subprocess.
 - **Python**: 3.11+, managed with `uv`, formatted and linted by `ruff`. Type
   hints on public functions. The core package depends only on numpy; PyTorch
   and friends sit behind the `train` extra.
@@ -110,7 +128,10 @@ The issue tracker is the project's history. Use the `gh` CLI.
   `engine/` or environment code.
 - **Training hardware**: use the RTX 3090 (select it by name or UUID, not by
   index, since the machine has two GPUs). Simulation runs on CPU across many
-  processes; the GPU is for the learner only.
+  processes; the GPU is for the learner only. Keep training code device
+  agnostic (take the device from configuration). Do not install or clone
+  tooling for other accelerators (for example Intel Gaudi) on this machine or
+  into this repository; that is a `needs-human` decision.
 - **Commits**: small, imperative subject line, one logical change each. `main`
   must always build and pass CI.
 - **Docs**: when a decision changes the design, update

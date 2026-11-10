@@ -67,7 +67,7 @@ def gamedata_dir() -> Path:
 
 
 def find_paks(base: Path | None = None) -> list[Path]:
-    """PAK files in ``<base>/id1``, in load order. Empty if none are present."""
+    """Every PAK file in ``<base>/id1``, whatever its name. Empty if none."""
     id1 = (base or gamedata_dir()) / "id1"
     if not id1.is_dir():
         return []
@@ -77,40 +77,95 @@ def find_paks(base: Path | None = None) -> list[Path]:
     )
 
 
+def engine_paks(base: Path | None = None) -> list[Path]:
+    """The PAK files the engine will load, in load order.
+
+    The engine opens ``pak0.pak``, ``pak1.pak``, ... by exactly those
+    lower-case names and stops at the first one that is missing.
+    """
+    id1 = (base or gamedata_dir()) / "id1"
+    paks = []
+    while (pak := id1 / f"pak{len(paks)}.pak").is_file():
+        paks.append(pak)
+    return paks
+
+
 @dataclass(frozen=True)
 class GameDataReport:
-    paks: list[Path]
-    missing: list[str]
+    paks: list[Path]  # files the engine will load
+    ignored: list[Path]  # PAK files present but not named pakN.pak in sequence
+    missing: list[str]  # required files not found in ``paks``
     registered: bool
 
     @property
-    def usable(self) -> bool:
+    def engine_ready(self) -> bool:
         return bool(self.paks) and not self.missing
 
 
 def inspect(base: Path | None = None) -> GameDataReport:
-    """Check which required files the local PAKs provide."""
-    paks = find_paks(base)
+    """Check that the engine can load the local PAKs and what they provide."""
+    paks = engine_paks(base)
     names: set[str] = set()
     for pak in paks:
         names.update(entry.name for entry in read_pak_directory(pak))
-    missing = [name for name in REQUIRED_FILES if name not in names]
-    return GameDataReport(paks=paks, missing=missing, registered=REGISTERED_MARKER in names)
+    return GameDataReport(
+        paks=paks,
+        ignored=[p for p in find_paks(base) if p not in paks],
+        missing=[name for name in REQUIRED_FILES if name not in names],
+        registered=REGISTERED_MARKER in names,
+    )
 
 
-def main() -> int:
+def link(source: Path, base: Path | None = None) -> list[Path]:
+    """Symlink the PAK files in ``source`` into ``<base>/id1`` with lower-case names.
+
+    Needed when the files are named ``PAK0.PAK`` (as on the original CD and
+    in the rerelease's ``dos/id1``), which the engine does not find on a
+    case-sensitive file system. Existing symlinks are replaced; real files
+    are never overwritten.
+    """
+    paks = find_paks(source.parent) if source.name == "id1" else []
+    paks = paks or sorted(p for p in source.iterdir() if p.suffix.lower() == ".pak")
+    if not paks:
+        raise FileNotFoundError(f"no PAK files in {source}")
+    id1 = (base or gamedata_dir()) / "id1"
+    if id1.is_symlink():
+        id1.unlink()
+    id1.mkdir(parents=True, exist_ok=True)
+    links = []
+    for pak in paks:
+        dest = id1 / pak.name.lower()
+        if dest.is_symlink():
+            dest.unlink()
+        elif dest.exists():
+            raise FileExistsError(f"{dest} is a real file; not replacing it")
+        dest.symlink_to(pak.resolve())
+        links.append(dest)
+    return links
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
     base = gamedata_dir()
     try:
+        if args[:1] == ["link"] and len(args) == 2:
+            for dest in link(Path(args[1]), base):
+                print(f"linked {dest.name} -> {dest.resolve()}")
+        elif args:
+            print("usage: python -m deepquake.gamedata [link <directory-with-pak-files>]")
+            return 2
         report = inspect(base)
     except (PakError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if not report.paks:
-        print(f"No PAK files found in {base / 'id1'}. See gamedata/README.md.", file=sys.stderr)
-        return 1
     for pak in report.paks:
         print(f"found {pak.name}")
+    for pak in report.ignored:
+        print(f"ignored {pak.name}: the engine only loads pak0.pak, pak1.pak, ... (lower case)")
+    if not report.paks:
+        print(f"error: no pak0.pak in {base / 'id1'}. See gamedata/README.md.", file=sys.stderr)
+        return 1
     if report.missing:
         print(f"error: missing required files: {', '.join(report.missing)}", file=sys.stderr)
         return 1

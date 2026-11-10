@@ -35,13 +35,23 @@ physics matters: a policy trained on almost-Quake movement will not transfer.
 - One simulator instance per process. The Quake server keeps its state in
   globals (`sv`, `svs`, the QuakeC VM); rather than rewrite that, training
   runs one worker process per environment.
-- Deterministic: same seed and actions give the same trajectory. The game's
-  randomness comes from four `rand()` call sites (`pr_cmds.c`, `sv_move.c`),
-  which are routed through a seeded generator, and the frame time is fixed
-  instead of read from the wall clock.
+- Deterministic: same seed and actions give the same trajectory. Every
+  `rand()` call in the engine is redirected at compile time to a seeded
+  generator (`engine/src/rng.c`), and there is no wall clock.
+- Fixed tick: one step is 1/72 s of game time by default (Quake's maximum
+  frame rate, at which its physics behaves as designed). It is configurable
+  at start-up up to 0.1 s; larger ticks are faster but change movement
+  slightly, so policies must be trained and played at the same tick.
+- The player is a client on a fake network connection (`net_fake.c`). The
+  API queues the same bytes a real client sends, and the unmodified server
+  code parses them, so player input takes exactly the path it takes in the
+  real game. When the game restarts the level (death) or changes level
+  (exit), the simulator signs the player on again and counts it.
+- Engine errors (`Sys_Error`) do not exit the process; they return an error
+  to the caller and mark the simulator dead.
 
 **Engine base: QuakeSpasm** (github.com/sezero/quakespasm, GPL-2.0-or-later),
-vendored under `engine/third_party/quakespasm/`. Chosen after surveying seven
+vendored unmodified under `engine/third_party/quakespasm/`. Chosen after surveying seven
 engines in November 2026:
 
 | Engine | Verdict |

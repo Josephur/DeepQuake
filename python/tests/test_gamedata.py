@@ -20,7 +20,7 @@ def write_pak(path: Path, files: dict[str, bytes]) -> None:
 
 def make_id1(tmp_path: Path, paks: dict[str, dict[str, bytes]]) -> Path:
     id1 = tmp_path / "id1"
-    id1.mkdir()
+    id1.mkdir(parents=True)
     for pak_name, files in paks.items():
         write_pak(id1 / pak_name, files)
     return tmp_path
@@ -49,9 +49,9 @@ def test_rejects_truncated_directory(tmp_path):
 
 
 def test_inspect_shareware(tmp_path):
-    base = make_id1(tmp_path, {"PAK0.PAK": dict.fromkeys(gamedata.REQUIRED_FILES, b"x")})
+    base = make_id1(tmp_path, {"pak0.pak": dict.fromkeys(gamedata.REQUIRED_FILES, b"x")})
     report = gamedata.inspect(base)
-    assert report.usable
+    assert report.engine_ready
     assert not report.registered
 
 
@@ -64,7 +64,7 @@ def test_inspect_registered_across_paks(tmp_path):
         },
     )
     report = gamedata.inspect(base)
-    assert report.usable
+    assert report.engine_ready
     assert report.registered
     assert [p.name for p in report.paks] == ["pak0.pak", "pak1.pak"]
 
@@ -72,11 +72,33 @@ def test_inspect_registered_across_paks(tmp_path):
 def test_inspect_reports_missing(tmp_path):
     base = make_id1(tmp_path, {"pak0.pak": {"progs.dat": b"x"}})
     report = gamedata.inspect(base)
-    assert not report.usable
+    assert not report.engine_ready
     assert report.missing == ["maps/start.bsp", "maps/e1m1.bsp"]
 
 
 def test_inspect_no_data(tmp_path):
     report = gamedata.inspect(tmp_path)
     assert report.paks == []
-    assert not report.usable
+    assert not report.engine_ready
+
+
+def test_upper_case_names_are_ignored_until_linked(tmp_path):
+    source = make_id1(tmp_path / "cd", {"PAK0.PAK": dict.fromkeys(gamedata.REQUIRED_FILES, b"x")})
+    report = gamedata.inspect(source)
+    assert not report.engine_ready
+    assert [p.name for p in report.ignored] == ["PAK0.PAK"]
+
+    base = tmp_path / "gamedata"
+    links = gamedata.link(source / "id1", base)
+    assert [p.name for p in links] == ["pak0.pak"]
+    assert links[0].is_symlink()
+    assert gamedata.inspect(base).engine_ready
+    # Linking again replaces the symlink rather than failing.
+    gamedata.link(source / "id1", base)
+
+
+def test_link_never_replaces_a_real_file(tmp_path):
+    source = make_id1(tmp_path / "cd", {"PAK0.PAK": {"progs.dat": b"x"}})
+    base = make_id1(tmp_path / "gamedata", {"pak0.pak": {"progs.dat": b"x"}})
+    with pytest.raises(FileExistsError):
+        gamedata.link(source / "id1", base)
