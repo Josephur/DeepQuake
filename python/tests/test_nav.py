@@ -21,6 +21,7 @@ classes = sorted({e.classname for e in sim.entities()})
 print(json.dumps({
     "pool": len(env.points), "pool_sum": float(env.points.sum()),
     "reachable": float(np.isfinite(env.path_distance).mean()),
+    "connected": float((np.isfinite(env.path_distance) | np.isfinite(env.path_distance).T).mean()),
     "obs_shape": list(obs.shape), "obs_dtype": str(obs.dtype),
     "obs_min": float(obs.min()), "obs_max": float(obs.max()),
     "goal_unit": float(np.hypot(obs[52], obs[53])),
@@ -35,11 +36,19 @@ print(json.dumps({
 @pytest.mark.gamedata
 def test_navigation_environment():
     require_gamedata()
-    out = run_in_subprocess(NAV)
-    again = run_in_subprocess(NAV)
+    # Building the walk graph in the simulator dominates this test (~80 s per
+    # run); it is slow by design, not hung.
+    out = run_in_subprocess(NAV, timeout=300)
+    again = run_in_subprocess(NAV, timeout=300)
 
     assert out["pool"] > 100
-    assert out["reachable"] > 0.05  # the walk graph links a useful share of point pairs
+    # The walk graph must connect most of the map so tasks can span it.
+    # Counted in at least one direction: many of e1m1's routes are real
+    # one-way drops (measured: 40/40 sampled reverses fail even with jumps
+    # and triple time), so directed pairs cap out far below the two-way
+    # connectivity. The reverse floor keeps one-way links honest.
+    assert out["connected"] > 0.80
+    assert out["reachable"] > 0.70
     assert out["obs_shape"] == [56] and out["obs_dtype"] == "float32"
     assert out["obs_min"] >= -2.0 and out["obs_max"] <= 2.0
     assert abs(out["goal_unit"] - 1.0) < 1e-4

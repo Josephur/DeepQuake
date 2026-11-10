@@ -60,14 +60,25 @@ A trained policy reaches goals on a real map far more often than both
 baselines. From here the work is tracked in the open GitHub issues. Known
 limits of this first policy, each with an issue:
 
-- The walk graph is fragmented, so no task is longer than about 2,100 units
-  and only about 17% of point pairs are connected (#18).
 - The policy has no memory and was trained on one map (#19). Models must
   work on maps they have never seen (ARCHITECTURE.md, "Map independence"),
   so #19 trains on many maps and reports held-out maps separately.
 - No map outside id's own has ever been loaded (#28).
 - Monsters are passive and the player invulnerable during navigation
   training; combat comes in M4.
+
+Re-measured after the walk graph was connected (2026-11-10, #18:
+`nav_e1m1_g3`, same 2,000,000 decisions; 89% of point pairs joined in at
+least one direction, up from 17%, longest route 6,790 units up from 2,150;
+many routes are real one-way drops, so 73% of ordered pairs are walkable).
+The tasks now span the level, which makes them harder — the first table's
+tasks were almost all short because fragmentation left nothing longer:
+
+| Policy | Success (goal 300–2,000) | Mean time | Success (goal 200–1,000) |
+| --- | --- | --- | --- |
+| Random actions | 4.3% | 14.2 s | 15.3% |
+| Bee-line | 35.7% | 4.0 s | 67.3% |
+| Trained | 75.3% | 5.4 s | 88.3% |
 
 ## M4 — First monster brain
 

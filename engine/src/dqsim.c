@@ -396,6 +396,7 @@ int dqsim_get_player(dqsim_player_state *out)
     }
     out->health = v->health;
     out->on_ground = ((int)v->flags & FL_ONGROUND) != 0;
+    out->waterlevel = (int)v->waterlevel;
     return DQSIM_OK;
 }
 

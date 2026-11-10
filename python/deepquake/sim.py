@@ -75,6 +75,7 @@ class _PlayerState(ctypes.Structure):
         ("view_angles", ctypes.c_float * 3),
         ("health", ctypes.c_float),
         ("on_ground", ctypes.c_int32),
+        ("waterlevel", ctypes.c_int32),
     ]
 
 
@@ -116,6 +117,7 @@ class PlayerState:
     view_angles: tuple[float, float, float]  # pitch, yaw, roll in degrees
     health: float
     on_ground: bool
+    waterlevel: int  # 0 dry, 1 ankles, 2 waist (swimming), 3 head under
 
 
 def find_library() -> Path:
@@ -168,6 +170,9 @@ def _load() -> ctypes.CDLL:
     lib.dqsim_time.argtypes = []
     lib.dqsim_state_hash.restype = ctypes.c_uint64
     lib.dqsim_state_hash.argtypes = []
+    lib.dqsim_snapshot_save.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    lib.dqsim_snapshot_restore.argtypes = [ctypes.c_void_p]
+    lib.dqsim_snapshot_free.argtypes = [ctypes.c_void_p]
     lib.dqsim_shutdown.restype = None
     lib.dqsim_shutdown.argtypes = []
     return lib
@@ -293,6 +298,7 @@ def player() -> PlayerState:
         view_angles=tuple(raw.view_angles),
         health=raw.health,
         on_ground=bool(raw.on_ground),
+        waterlevel=int(raw.waterlevel),
     )
 
 
@@ -318,6 +324,29 @@ def time() -> float:
 def state_hash() -> int:
     """Hash of the complete game state, for determinism checks."""
     return _load().dqsim_state_hash()
+
+
+def snapshot_save() -> int:
+    """Save the complete simulation state; returns an opaque handle.
+
+    The handle goes to :func:`snapshot_restore` and :func:`snapshot_free`.
+    It stays valid only while the same level episode continues: loading a
+    map, a level change, or :func:`shutdown` makes it stale, and restoring
+    a stale snapshot raises :class:`SimError` without changing anything.
+    """
+    handle = ctypes.c_void_p()
+    _check(_load().dqsim_snapshot_save(ctypes.byref(handle)))
+    return int(handle.value)
+
+
+def snapshot_restore(handle: int) -> None:
+    """Put the simulation back into the state :func:`snapshot_save` captured."""
+    _check(_load().dqsim_snapshot_restore(ctypes.c_void_p(handle)))
+
+
+def snapshot_free(handle: int) -> None:
+    """Release a snapshot handle. Accepts 0 (no snapshot)."""
+    _load().dqsim_snapshot_free(ctypes.c_void_p(handle))
 
 
 def shutdown() -> None:

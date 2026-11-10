@@ -31,10 +31,15 @@ def require_gamedata() -> None:
         pytest.skip("no usable game data; see gamedata/README.md")
 
 
-def run_in_subprocess(code: str) -> dict:
-    """Run code in a new interpreter; it must print one JSON object last."""
+def run_in_subprocess(code: str, timeout: float = 120) -> dict:
+    """Run code in a new interpreter; it must print one JSON object last.
+
+    ``timeout`` is generous by default so a hang is caught; a caller whose
+    code is slow by design (building a walk graph takes about a minute) passes
+    its own.
+    """
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -112,3 +117,38 @@ def test_deterministic_across_processes():
     other = run_in_subprocess(EPISODE.format(seed=8))
     assert first["hashes"] == second["hashes"]
     assert first["hashes"] != other["hashes"]
+
+
+SNAPSHOT = """
+import json
+from deepquake import sim
+sim.init()
+sim.load_map("e1m1", skill=1, seed=0)
+sim.step(forward=400, yaw=90, repeat=72)
+snap = sim.snapshot_save()
+saved_hash = sim.state_hash()
+saved_time = sim.time()
+sim.step(forward=400, yaw=180, repeat=72)
+moved_hash = sim.state_hash()
+sim.snapshot_restore(snap)
+restored_hash = sim.state_hash()
+sim.load_map("e1m1", skill=1, seed=0)  # a new episode makes the snapshot stale
+stale = "no error"
+try:
+    sim.snapshot_restore(snap)
+except sim.SimError as exc:
+    stale = str(exc)
+sim.snapshot_free(snap)
+print(json.dumps({"saved": saved_hash, "moved": moved_hash, "restored": restored_hash,
+                  "time": saved_time, "stale": stale}))
+"""
+
+
+@pytest.mark.gamedata
+def test_snapshot_save_restore():
+    require_gamedata()
+    out = run_in_subprocess(SNAPSHOT)
+    assert out["saved"] != out["moved"]  # the walk changed something
+    assert out["restored"] == out["saved"]  # and the restore undid it
+    assert out["time"] > 0
+    assert "episode" in out["stale"]  # a stale snapshot is refused, not applied

@@ -67,6 +67,7 @@ typedef struct dqsim_player_state {
     float view_angles[3]; /* pitch, yaw, roll */
     float health;
     int32_t on_ground;
+    int32_t waterlevel; /* 0 dry, 1 ankles, 2 waist (swimming), 3 head under */
 } dqsim_player_state;
 
 /* One entity in the level, as returned by dqsim_get_entities(). */
