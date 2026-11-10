@@ -19,7 +19,7 @@ M4 onward are created when that milestone starts.
 - [x] C API: create, load map, reset(seed), step, destroy (#5)
 - [x] Seeded random numbers and fixed frame time (no wall clock) (#6)
 - [x] Determinism test: same seed and inputs give identical state hashes (#7)
-- [ ] Fidelity test: recorded player inputs replay to the same positions as the unmodified engine (#8)
+- [x] Fidelity test: recorded player inputs replay to the same positions as the unmodified engine (#8)
 - [ ] Snapshot and restore (#9)
 - [x] Throughput benchmark (ticks per second per core) recorded in this file (#10)
 
@@ -65,8 +65,7 @@ limits of this first policy, each with an issue:
 - The policy has no memory and was trained on one map (#19).
 - Monsters are passive and the player invulnerable during navigation
   training; combat comes in M4.
-- M1 leftovers: fidelity test against stock QuakeSpasm (#8), snapshot and
-  restore (#9).
+- M1 leftovers: snapshot and restore (#9).
 
 ## M4 — First monster brain
 
