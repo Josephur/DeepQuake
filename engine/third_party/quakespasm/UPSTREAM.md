@@ -38,10 +38,28 @@ our own code in `engine/src/`:
 
 ## Local patches
 
-**None.** Every file is byte-identical to upstream at the commit above. Keep
-it that way where possible: prefer a shim, a stub, or a compile definition
-over editing a vendored file. If an edit is unavoidable, list it here with
-the file, the reason, and a marker comment `// DeepQuake:` at the change.
+**None.** Every file is byte-identical to upstream at the commit above, and
+`tools/check_repo_hygiene.py` (pre-commit hook and CI) enforces it: each
+file's checksum must match `SHA256SUMS` in this directory.
+
+Keep it that way where possible: prefer a shim, a stub, or a compile
+definition over editing a vendored file. Trace and debug code is never a
+patch; it goes in a scratch copy (see "Instrumenting the engine" in
+`AGENTS.md`). If a permanent edit is unavoidable:
+
+1. Mark the change in the file with a comment starting `// DeepQuake:`.
+2. Add a line to the list below, exactly in this form, with the checksum of
+   the patched file (`sha256sum Quake/<file>`):
+
+   ```
+   - `Quake/<file>` sha256 `<64 hex digits>`: <what was changed and why>
+   ```
+
+Do not edit `SHA256SUMS` for a patch: it records upstream, not our changes.
+
+Patches:
+
+(none)
 
 ## Updating
 
@@ -50,4 +68,6 @@ the file, the reason, and a marker comment `// DeepQuake:` at the change.
 3. Build; if the link fails on a new undefined symbol, add a stub.
 4. Run the full test suite including the `gamedata` tests. The determinism
    and fidelity tests decide whether the update is acceptable.
-5. Update the commit and date in this file.
+5. Update the commit and date in this file, and regenerate the checksums:
+   `sha256sum LICENSE.txt Quake/* > SHA256SUMS` (run in this directory).
+   Update the checksum of every patch line as well.

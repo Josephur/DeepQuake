@@ -1,6 +1,11 @@
 option(DQSIM_SANITIZE "Build our code and tests with ASan and UBSan" OFF)
 
-set(QS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quakespasm/Quake)
+# The engine source to compile. Leave at the default except to build an
+# instrumented scratch copy for debugging (see "Instrumenting the engine" in
+# AGENTS.md); never point a dev or release build elsewhere.
+set(DQSIM_QUAKESPASM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quakespasm CACHE PATH
+    "Directory holding the QuakeSpasm source (its Quake/ subdirectory is compiled)")
+set(QS_DIR ${DQSIM_QUAKESPASM_DIR}/Quake)
 
 # Include order matters: src/shim provides stand-ins for SDL.h, SDL_opengl.h
 # and glquake.h, which are deliberately not vendored.

@@ -16,6 +16,11 @@ and every session starts by finding out where the last one stopped.
 1. `git status` and `git branch --show-current`. If there are uncommitted
    changes, they are the last session's unsaved work: read the diff, and
    commit them to the current issue branch as `WIP` if they belong to it.
+   **Exception:** changes under `engine/third_party/` are never committed
+   as WIP. They are leftover trace or debug code. Read the diff to learn
+   what the last session was looking into, then undo it with
+   `git checkout -- engine/third_party`, unless the issue's last Checkpoint
+   names that file as a deliberate patch.
 2. `gh run list --branch main --limit 1`. If CI on `main` is failing, fixing
    it is your task for this session (open a `bug` issue for it).
 3. `gh issue list --label in-progress`. There is at most one.
@@ -222,7 +227,27 @@ The issue tracker is the project's history. Use the `gh` CLI.
   differently, first try a stub in `engine/src/client_stubs.c`, a shim header
   in `engine/src/shim/`, or a compile definition in `engine/CMakeLists.txt`.
   Edit a vendored file only when none of those can work, mark the change with
-  a `// DeepQuake:` comment, and list it in `UPSTREAM.md`.
+  a `// DeepQuake:` comment, and list it in `UPSTREAM.md` with its checksum,
+  in the form that file describes. The hygiene check compares every
+  vendored file with `SHA256SUMS` and fails on any other difference.
+- **Instrumenting the engine** (adding prints or traces to see what it does
+  internally) is done in a scratch copy, never in `engine/third_party/` and
+  never in the fidelity reference `engine/.fidelity/`:
+
+  ```bash
+  mkdir -p engine/.scratch && cp -r engine/third_party/quakespasm engine/.scratch/quakespasm
+  # edit files under engine/.scratch/quakespasm/Quake/, then build a separate tree:
+  cmake -S . -B build/trace -DDQSIM_QUAKESPASM_DIR=$PWD/engine/.scratch/quakespasm
+  cmake --build build/trace
+  ```
+
+  To instrument the stock engine the same way, copy
+  `engine/.fidelity/quakespasm` to `engine/.scratch/reference` and build
+  that copy with its own Makefile. `engine/.scratch/` and `build/` are
+  gitignored. Delete the scratch copy when you have your answer. The
+  hygiene check refuses any commit while a vendored file differs from
+  upstream or the fidelity reference has local changes, and never measure
+  fidelity against anything but the untouched reference.
 - **One simulator per process.** The engine's state is global. Never try to
   run two simulations in one process or call it from two threads; use worker
   processes. `dqsim_init` can be called once per process, which is why Python

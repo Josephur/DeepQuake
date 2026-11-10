@@ -65,3 +65,8 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+
+# ---------------------------------------------------------------------------
+# Scratch copies of the engine for tracing and debugging (see AGENTS.md)
+# ---------------------------------------------------------------------------
+/engine/.scratch/
