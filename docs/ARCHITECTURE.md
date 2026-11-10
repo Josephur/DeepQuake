@@ -29,24 +29,41 @@ physics matters: a policy trained on almost-Quake movement will not transfer.
   and monster movement, and the QuakeC VM running the stock `progs.dat` (so
   weapons, items, doors, triggers, and damage behave as in the real game).
 - Remove the client side: renderer, sound, input, networking, console UI.
-- Expose a small C API in `engine/include/dqsim/`: create instance, load map,
-  reset with seed, apply actions, step one tick, read observations, snapshot
-  and restore. No global state, so many instances can live in one process.
-- Deterministic: same seed and actions give the same trajectory.
+- Expose a small C API in `engine/include/dqsim/`: create, load map, reset
+  with seed, apply actions, step one tick, read observations, snapshot and
+  restore.
+- One simulator instance per process. The Quake server keeps its state in
+  globals (`sv`, `svs`, the QuakeC VM); rather than rewrite that, training
+  runs one worker process per environment.
+- Deterministic: same seed and actions give the same trajectory. The game's
+  randomness comes from four `rand()` call sites (`pr_cmds.c`, `sv_move.c`),
+  which are routed through a seeded generator, and the frame time is fixed
+  instead of read from the wall clock.
 
-**Engine base (to confirm at the start of M1):** one engine from the
-QuakeSpasm lineage, vendored under `engine/third_party/`. Ironwail is the
-leading candidate because it is maintained and loads both original and
-rerelease data. The same vendored server source is compiled into both the
-headless library and the playable client, so training and play share physics
-by construction. Quake Enhanced (KEX) is closed source and is only a source of
-`id1` data.
+**Engine base: QuakeSpasm** (github.com/sezero/quakespasm, GPL-2.0-or-later),
+vendored under `engine/third_party/quakespasm/`. Chosen after surveying seven
+engines in November 2026:
+
+| Engine | Verdict |
+| --- | --- |
+| QuakeSpasm | **Chosen.** Plain C, 64-bit clean, actively maintained. Its server core (`sv_*.c`, `pr_*.c`, `world.c`, about 8,800 lines) contains no references to client, renderer, or SDL code, so it separates cleanly. Faithful to original physics. |
+| Ironwail | QuakeSpasm fork with a faster renderer. Its server core has picked up client-side QuakeC, drawing calls, and SDL threading, so it is harder to strip. Physics files differ from QuakeSpasm by only a few lines, so it remains an option for the play client later. |
+| vkQuake, QuakeSpasm-Spiked | Server code is heavily entangled with the client, particles, sound, and (vkQuake) multithreading. |
+| id's original WinQuake | Ships null drivers, but is 32-bit only (QuakeC strings are stored as pointer offsets) and unmaintained since 1999. QuakeSpasm is this code with those problems fixed. |
+| FTEQW, DarkPlaces | Have dedicated servers, but are far larger (790k and 200k lines) and deliberately change physics and QuakeC behaviour. |
+
+No existing project wraps the Quake 1 engine as a training environment, so
+there is nothing to reuse there. The same vendored server source is compiled
+into both the headless library and the playable client, so training and play
+share physics by construction. Quake Enhanced (KEX) is closed source and is
+only a source of `id1` data.
 
 ### 2. Brain hook
 
 The point where a policy takes over from QuakeC. Monster think functions
 (`ai_stand`, `ai_walk`, `ai_run`, attack selection) are intercepted in the
-engine; the policy chooses movement and when to start an attack, and the
+engine (monster movement lives in `sv_move.c`: `SV_movestep`, `SV_NewChaseDir`,
+`SV_MoveToGoal`); the policy chooses movement and when to start an attack, and the
 existing QuakeC code still plays the animation and applies the damage. With no
 model loaded for a monster type the stock AI runs unchanged, so the game is
 always playable.

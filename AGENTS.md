@@ -67,6 +67,36 @@ no GPU. Anything needing game data or a GPU must be a pytest test marked
 `gamedata` or `gpu`; those are deselected in CI and must skip cleanly when the
 resource is absent.
 
+## Work tracking: every change has a GitHub issue
+
+The issue tracker is the project's history. Use the `gh` CLI.
+
+1. **Before starting work**, find the issue for it (`gh issue list`,
+   `docs/ROADMAP.md` names them). If none exists, create one first:
+   `gh issue create --title "..." --label <type>,<area> --milestone "<milestone>" --body "..."`
+   with a body stating the **Goal** and a **Done when** checklist.
+   - Type label, exactly one: `bug`, `feature`, `task`, `research`, `documentation`.
+   - Area label, at least one: `area:engine`, `area:python`, `area:training`, `area:infra`.
+2. **When you start**, comment that you are starting and your approach in one
+   or two sentences.
+3. **While working**, comment on anything a later reader would need: a
+   decision and its reason, a dead end and why it failed, a measurement.
+   Bugs you find along the way get their own `bug` issue with steps to
+   reproduce, expected and actual behaviour; do not fix them silently.
+4. **Commits** reference the issue in the message body as `Refs #N`. Do not
+   use `Closes #N` or `Fixes #N`: issues are closed by hand, with a comment.
+5. **When done**, and only after the checks pass and the change is pushed,
+   close with a comment:
+   `gh issue close N --comment "..."` stating what was done, the commit
+   hashes, and the evidence that each **Done when** item is met (test names,
+   command output, numbers). If an item was not met, do not close; say what
+   remains.
+6. **If you cannot proceed**, add the `blocked` label and a comment with the
+   reason. If it needs the maintainer (a decision, a purchase, access, a
+   licence question), add `needs-human` as well, then move to another issue.
+7. Never close an issue as completed for work that is partial, untested, or
+   failing. Never delete issues or edit other people's comments.
+
 ## Conventions
 
 - **C**: C11, `-Wall -Wextra -Werror` for our code (not for `third_party/`).
