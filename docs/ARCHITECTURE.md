@@ -101,8 +101,24 @@ Small recurrent policies trained from scratch with PPO, on the order of 10⁵ to
 72 Hz for dozens of monsters, so each decision has a budget well under a
 millisecond, and the inputs are geometry and kinematics, not text.
 
-Start with one network per monster type sharing an architecture. Shared
-trunks or cross-type distillation can come later if they help.
+**One shared network for all monster types, not one network each.** Most of
+what a monster must learn is the same for every type: reading geometry from
+ray casts, path-finding, keeping or breaking line of sight, judging the
+player's movement. Separate networks would each relearn that from scratch
+and could not learn to cooperate in mixed groups. So:
+
+- a shared trunk (encoder and recurrent core) used by every monster;
+- a monster-type embedding as an extra input, so behaviour can differ by
+  body (a Fiend leaps, a Scrag flies, an Ogre lobs grenades);
+- a small output head per type, because the available actions differ.
+
+The first monster (Grunt) is trained alone, which is the same thing as a
+per-monster model. The shared design starts to matter with the second type,
+which begins from the Grunt's trunk instead of from nothing. One network also
+suits play: every monster in the level is evaluated in a single batched
+inference call per tick. If a type later proves to be held back by sharing,
+it can be split off and fine-tuned on its own; that direction is easy, the
+reverse is not.
 
 ### 5. Training — `python/deepquake/`
 
