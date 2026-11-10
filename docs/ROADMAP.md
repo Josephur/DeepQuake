@@ -62,12 +62,17 @@ limits of this first policy, each with an issue:
 
 - The walk graph is fragmented, so no task is longer than about 2,100 units
   and only about 17% of point pairs are connected (#18).
-- The policy has no memory and was trained on one map (#19).
+- The policy has no memory and was trained on one map (#19). Models must
+  work on maps they have never seen (ARCHITECTURE.md, "Map independence"),
+  so #19 trains on many maps and reports held-out maps separately.
+- No map outside id's own has ever been loaded (#28).
 - Monsters are passive and the player invulnerable during navigation
   training; combat comes in M4.
 
 ## M4 — First monster brain
 
+- [ ] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
+- [ ] Decide how the hook treats maps that ship their own game code (#27)
 - [ ] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt)
 - [ ] Player agent learns combat; opponent pool
 - [ ] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22)

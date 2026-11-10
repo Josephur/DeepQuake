@@ -272,6 +272,11 @@ The issue tracker is the project's history. Use the `gh` CLI.
 - **Changing the observation or action layout** invalidates every saved
   checkpoint. Do it deliberately, update the table in `nav.py`'s docstring
   and `docs/ARCHITECTURE.md`, and retrain.
+- **Models are map independent.** A policy's inputs come only from live
+  engine state relative to the agent: never absolute coordinates, a map
+  name, or anything precomputed per map (the walk graph is for choosing
+  tasks and shaping reward only). Claim generalisation only from maps kept
+  out of training. See "Map independence" in `docs/ARCHITECTURE.md`.
 - **Commits**: imperative subject line. On an issue branch, commit often.
   On `main`, one squashed commit per issue. `main` must always build and
   pass CI.

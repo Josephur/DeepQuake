@@ -126,6 +126,36 @@ Chosen to be cheap to compute in the simulator and identical in the client:
 - **Skill conditioning**: one more input, Quake's own `skill` setting
   (0 easy, 1 normal, 2 hard, 3 nightmare). See "Difficulty" below.
 
+#### Map independence
+
+A trained model must work on any map, including a custom map nobody on this
+project has seen, as long as its monsters are ones the model knows how to
+control. The player picks a map and it works; nothing is prepared per map.
+Four rules keep that true:
+
+1. **Inputs come only from live engine state, relative to the agent.** Ray
+   casts from where it stands, its own velocity, what it can currently see
+   and hear, its own memory. No absolute coordinates, no map name, no
+   per-map embedding, and nothing looked up from a file made for that map.
+2. **Per-map artifacts are scaffolding for training and evaluation only.**
+   The walk graph in `nav.py` chooses tasks and shapes the reward; the
+   policy never sees it, and play never needs it. Feeding the policy a hint
+   derived from it (the route's direction, say) would break this rule, even
+   though it would make the training numbers better.
+3. **Generalisation is measured, not assumed.** A result says something
+   about new maps only if it was measured on maps kept out of training.
+   Training draws from many maps, and evaluation reports held-out maps as
+   their own group (#19).
+4. **Unknown content falls back to stock AI.** A monster type with no model,
+   or a map whose game code changes a monster we thought we knew, keeps its
+   QuakeC brain (#27).
+
+Rule 1 has a cost: with only local senses, finding a route across a level it
+has never seen takes memory and exploration, which is why the recurrent core
+comes before combat. It also puts weight on what the rays report. Today that
+is distance only, so lava looks like floor; the surface kind per ray (#26)
+goes in before the first monster is trained.
+
 #### Difficulty
 
 Difficulty follows Quake's `skill` cvar; there is no second difficulty
