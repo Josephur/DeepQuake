@@ -95,6 +95,10 @@ if(BUILD_TESTING)
   add_test(NAME dqsim.sim COMMAND test_sim ${DQSIM_TEST_GAMEDATA})
   set_tests_properties(dqsim.sim PROPERTIES SKIP_RETURN_CODE 77 LABELS gamedata)
 
+  dqsim_add_test(test_snapshot)
+  add_test(NAME dqsim.snapshot COMMAND test_snapshot ${DQSIM_TEST_GAMEDATA})
+  set_tests_properties(dqsim.snapshot PROPERTIES SKIP_RETURN_CODE 77 LABELS gamedata)
+
   # Fidelity against pristine upstream QuakeSpasm, built by
   # tools/fetch_fidelity_reference.sh (local only; skips when absent).
   set(DQSIM_FIDELITY_REF "${CMAKE_CURRENT_SOURCE_DIR}/.fidelity/quakespasm/Quake/quakespasm"

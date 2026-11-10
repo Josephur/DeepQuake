@@ -17,8 +17,8 @@
 
 #include "dq_internal.h"
 
-#define QUEUE_SLOTS 8
-#define SLOT_BYTES 256
+#define QUEUE_SLOTS DQ_NET_SLOTS
+#define SLOT_BYTES DQ_NET_SLOT_BYTES
 
 sizebuf_t net_message;
 double net_time;
@@ -40,6 +40,25 @@ void dq_net_request_connect(void)
 {
     connect_pending = true;
     queue_head = queue_count = 0;
+}
+
+/* Snapshot support: everything queued but not yet read by the server. */
+void dq_net_get_state(dq_net_state *out)
+{
+    memcpy(out->queue, queue, sizeof(queue));
+    memcpy(out->queue_length, queue_length, sizeof(queue_length));
+    out->queue_head = queue_head;
+    out->queue_count = queue_count;
+    out->connect_pending = connect_pending;
+}
+
+void dq_net_set_state(const dq_net_state *in)
+{
+    memcpy(queue, in->queue, sizeof(queue));
+    memcpy(queue_length, in->queue_length, sizeof(queue_length));
+    queue_head = in->queue_head;
+    queue_count = in->queue_count;
+    connect_pending = in->connect_pending;
 }
 
 void dq_net_queue(const void *data, int length)

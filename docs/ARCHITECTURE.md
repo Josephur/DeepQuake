@@ -49,6 +49,17 @@ physics matters: a policy trained on almost-Quake movement will not transfer.
   (exit), the simulator signs the player on again and counts it.
 - Engine errors (`Sys_Error`) do not exit the process; they return an error
   to the caller and mark the simulator dead.
+- Snapshots are in-memory copies of the mutable server state: `sv`, `svs`,
+  the live edicts, the client block, the QuakeC globals, the clocks, the RNG,
+  and the fake network's pending input. Restoring one and replaying the same
+  actions reproduces the original state hashes. The map hunk (models,
+  `progs.dat`, the string table) is never rewound because it does not change
+  during play, so restore cannot leave dangling model or string pointers. The
+  world's spatial index is rebuilt from the restored edicts' area links in
+  their exact order, so collision tie-breaking and trigger order match the
+  original run. A snapshot is valid only in the process and level episode
+  that made it; a new map, a level change, or a death restart makes it stale
+  and restore refuses it.
 
 **Engine base: QuakeSpasm** (github.com/sezero/quakespasm, GPL-2.0-or-later),
 vendored unmodified under `engine/third_party/quakespasm/`. Chosen after surveying seven

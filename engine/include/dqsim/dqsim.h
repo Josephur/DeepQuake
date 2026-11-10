@@ -16,6 +16,7 @@
 #ifndef DQSIM_H
 #define DQSIM_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -163,6 +164,36 @@ DQSIM_API double dqsim_time(void);
  * Equal seeds and inputs must give equal hashes at every tick.
  */
 DQSIM_API uint64_t dqsim_state_hash(void);
+
+/*
+ * Snapshot of a running simulation, held in memory. It is valid only in the
+ * process that made it, and only while the same level episode continues:
+ * dqsim_load_map(), a level change, or dqsim_shutdown() makes it stale.
+ * Restoring a stale snapshot fails without changing anything.
+ */
+typedef struct dqsim_snapshot dqsim_snapshot;
+
+/*
+ * Save the complete simulation state, so that restoring it and replaying the
+ * same actions gives the same state hashes as the original run. On success
+ * *out receives a snapshot that the caller frees with dqsim_snapshot_free().
+ * Fails, leaving *out untouched, when no map is loaded.
+ */
+DQSIM_API int dqsim_snapshot_save(dqsim_snapshot **out);
+
+/*
+ * Restore a snapshot taken in this level episode. Afterwards the state hash
+ * and dqsim_time() equal what they were when the snapshot was saved. Fails
+ * without changing anything if the snapshot is from another episode or the
+ * engine has shut down.
+ */
+DQSIM_API int dqsim_snapshot_restore(const dqsim_snapshot *snapshot);
+
+/* Bytes the snapshot occupies, or 0 for NULL. */
+DQSIM_API size_t dqsim_snapshot_size(const dqsim_snapshot *snapshot);
+
+/* Release a snapshot. Accepts NULL. */
+DQSIM_API void dqsim_snapshot_free(dqsim_snapshot *snapshot);
 
 /* Stop the engine and release its memory. */
 DQSIM_API void dqsim_shutdown(void);

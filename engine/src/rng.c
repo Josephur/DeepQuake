@@ -26,3 +26,14 @@ int dqsim_rand(void)
     z ^= z >> 31;
     return (int)(z & (uint64_t)RAND_MAX);
 }
+
+/* Snapshot support: the generator is the whole state of rand(). */
+uint64_t dq_rand_state(void)
+{
+    return rng_state;
+}
+
+void dq_rand_set_state(uint64_t state)
+{
+    rng_state = state;
+}

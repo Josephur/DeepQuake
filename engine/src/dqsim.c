@@ -9,6 +9,8 @@
  */
 #include "quakedef.h"
 
+#include <stddef.h>
+
 #include "dq_internal.h"
 #include "dqsim/dqsim.h"
 
@@ -26,6 +28,8 @@ static quakeparms_t parms;
 static char basedir[1024];
 static char *engine_argv[5];
 static int level_count;
+/* Bumped whenever a new level episode starts, so old snapshots are refused. */
+static uint32_t level_serial;
 
 /*
  * Every API function that enters the engine starts with DQ_ENTER. If the
@@ -205,6 +209,7 @@ int dqsim_load_map(const char *map, int skill, uint32_t seed)
     run_frame();
     sign_on();
     level_count = 0;
+    level_serial++;
     return DQSIM_OK;
 }
 
@@ -246,6 +251,7 @@ int dqsim_step(const dqsim_action *action)
     if (sv.active && svs.clients[0].active && !svs.clients[0].spawned) {
         sign_on();
         level_count++;
+        level_serial++;
     }
     return DQSIM_OK;
 }
@@ -426,6 +432,222 @@ uint64_t dqsim_state_hash(void)
             hash = fnv1a(hash, &ent->v, fields_size);
     }
     return hash;
+}
+
+/*
+ * Snapshots
+ * =========
+ *
+ * A snapshot is the mutable part of the server state, copied into one block
+ * of memory. It is in-memory only and valid only in this process and this
+ * level episode: a new map, a level change or a death restart runs
+ * SV_SpawnServer(), which frees and reallocates sv.edicts, so level_serial
+ * distinguishes the episode and stale snapshots are refused.
+ *
+ * The map hunk is deliberately not captured: models, progs.dat and the
+ * QuakeC string table never change during play. Models load only at map load
+ * (PF_precache_model refuses outside ss_loading; PF_setmodel only indexes
+ * precached models) and strings are appended, never rewritten. Restore
+ * therefore never rewinds the hunk, which keeps mod_known and
+ * pr_knownstrings consistent.
+ *
+ * The world's spatial index (sv_areanodes, static in world.c) is not
+ * captured either. It is rebuilt from the restored edicts' area links, which
+ * encode each list's exact order.
+ */
+#define DQ_SNAPSHOT_MAGIC 0x4451534eU /* "DQSN" */
+
+typedef struct dq_snapshot_header {
+    uint32_t magic;
+    uint32_t level_serial;
+    char map[64];
+    uint64_t rng_state;
+    double realtime;
+    int host_framecount;
+    int level_count;
+    int num_edicts;
+    int pr_edict_size;
+    int maxclientslimit;
+    int numglobals;
+    size_t clients_offset;
+    size_t edicts_offset;
+    size_t globals_offset;
+    size_t net_offset;
+    size_t cmd_struct_offset;
+    size_t cmd_offset;
+    size_t cmd_size;
+    size_t total_size;
+} dq_snapshot_header;
+
+struct dqsim_snapshot {
+    dq_snapshot_header header;
+    unsigned char payload[];
+};
+
+/* Is this link one of the edicts' own area links rather than a list head? */
+static qboolean is_edict_link(const link_t *link)
+{
+    const unsigned char *base = (const unsigned char *)sv.edicts;
+    const unsigned char *p = (const unsigned char *)link;
+    const size_t area_offset = offsetof(edict_t, area);
+
+    if (p < base + area_offset)
+        return false;
+    size_t diff = (size_t)(p - (base + area_offset));
+    if (diff >= (size_t)sv.num_edicts * (size_t)pr_edict_size)
+        return false;
+    return diff % (size_t)pr_edict_size == 0;
+}
+
+/*
+ * Recreate sv_areanodes in the exact order the snapshot had. SV_ClearWorld()
+ * builds the nodes with empty, self-linked lists; the restored edicts still
+ * carry the saved links, in which the first edict of each list points back at
+ * its head and the last points forward at it. Setting those two head links is
+ * enough to rebuild every list, order included.
+ */
+static void rebuild_world_links(void)
+{
+    SV_ClearWorld();
+
+    for (int i = 0; i < sv.num_edicts; i++) {
+        edict_t *ent = EDICT_NUM(i);
+        if (!ent->area.prev)
+            continue; /* not linked */
+        if (!is_edict_link(ent->area.prev))
+            ent->area.prev->next = &ent->area; /* first in the list */
+        if (ent->area.next && !is_edict_link(ent->area.next))
+            ent->area.next->prev = &ent->area; /* last in the list */
+    }
+}
+
+int dqsim_snapshot_save(dqsim_snapshot **out)
+{
+    if (!out)
+        return fail("dqsim_snapshot_save: out is NULL");
+    DQ_ENTER();
+    if (!sv.active || !svs.clients[0].spawned)
+        return fail("dqsim_snapshot_save: no map is loaded");
+
+    const size_t client_bytes = (size_t)svs.maxclientslimit * sizeof(client_t);
+    const size_t edict_bytes = (size_t)sv.num_edicts * (size_t)pr_edict_size;
+    const size_t globals_bytes = (size_t)progs->numglobals * sizeof(float);
+    const size_t cmd_bytes = cmd_text.data ? (size_t)cmd_text.cursize : 0;
+
+    const size_t clients_offset = sizeof(server_t) + sizeof(server_static_t);
+    const size_t edicts_offset = clients_offset + client_bytes;
+    const size_t globals_offset = edicts_offset + edict_bytes;
+    const size_t net_offset = globals_offset + globals_bytes;
+    const size_t cmd_struct_offset = net_offset + sizeof(dq_net_state);
+    const size_t cmd_offset = cmd_struct_offset + sizeof(sizebuf_t);
+    const size_t payload_size = cmd_offset + cmd_bytes;
+    const size_t total_size = sizeof(dq_snapshot_header) + payload_size;
+
+    dqsim_snapshot *snap = malloc(sizeof(*snap) + payload_size);
+    if (!snap)
+        return fail("dqsim_snapshot_save: out of memory");
+
+    dq_snapshot_header *h = &snap->header;
+    memset(h, 0, sizeof(*h));
+    h->magic = DQ_SNAPSHOT_MAGIC;
+    h->level_serial = level_serial;
+    q_strlcpy(h->map, sv.name, sizeof(h->map));
+    h->rng_state = dq_rand_state();
+    h->realtime = realtime;
+    h->host_framecount = host_framecount;
+    h->level_count = level_count;
+    h->num_edicts = sv.num_edicts;
+    h->pr_edict_size = pr_edict_size;
+    h->maxclientslimit = svs.maxclientslimit;
+    h->numglobals = (int)progs->numglobals;
+    h->clients_offset = clients_offset;
+    h->edicts_offset = edicts_offset;
+    h->globals_offset = globals_offset;
+    h->net_offset = net_offset;
+    h->cmd_struct_offset = cmd_struct_offset;
+    h->cmd_offset = cmd_offset;
+    h->cmd_size = cmd_bytes;
+    h->total_size = total_size;
+
+    unsigned char *p = snap->payload;
+    memcpy(p, &sv, sizeof(sv));
+    memcpy(p + sizeof(server_t), &svs, sizeof(svs));
+    memcpy(p + clients_offset, svs.clients, client_bytes);
+    memcpy(p + edicts_offset, sv.edicts, edict_bytes);
+    memcpy(p + globals_offset, pr_global_struct, globals_bytes);
+    dq_net_get_state((dq_net_state *)(p + net_offset));
+    memcpy(p + cmd_struct_offset, &cmd_text, sizeof(cmd_text));
+    if (cmd_bytes)
+        memcpy(p + cmd_offset, cmd_text.data, cmd_bytes);
+
+    *out = snap;
+    return DQSIM_OK;
+}
+
+/* Every reason a snapshot may not apply here, before anything is changed. */
+static int check_snapshot(const dqsim_snapshot *snap)
+{
+    if (snap->header.magic != DQ_SNAPSHOT_MAGIC)
+        return fail("dqsim_snapshot_restore: not a snapshot");
+    if (snap->header.level_serial != level_serial ||
+        q_strcasecmp(snap->header.map, sv.name) != 0)
+        return fail("dqsim_snapshot_restore: the snapshot is from a different level episode");
+    if (snap->header.pr_edict_size != pr_edict_size ||
+        snap->header.maxclientslimit != svs.maxclientslimit ||
+        snap->header.numglobals != (int)progs->numglobals)
+        return fail("dqsim_snapshot_restore: the snapshot is from a different engine configuration");
+    if (snap->header.num_edicts < 1 || snap->header.num_edicts > sv.max_edicts)
+        return fail("dqsim_snapshot_restore: the snapshot has an invalid edict count");
+
+    const unsigned char *p = snap->payload;
+    const server_t *saved_sv = (const server_t *)p;
+    const server_static_t *saved_svs = (const server_static_t *)(p + sizeof(server_t));
+    if (saved_sv->edicts != sv.edicts || saved_svs->clients != svs.clients)
+        return fail("dqsim_snapshot_restore: the snapshot is from a different level episode");
+    return DQSIM_OK;
+}
+
+int dqsim_snapshot_restore(const dqsim_snapshot *snapshot)
+{
+    if (!snapshot)
+        return fail("dqsim_snapshot_restore: snapshot is NULL");
+    DQ_ENTER();
+    if (!sv.active || !svs.clients[0].spawned)
+        return fail("dqsim_snapshot_restore: no map is loaded");
+    if (check_snapshot(snapshot) != DQSIM_OK)
+        return DQSIM_ERROR;
+
+    const dq_snapshot_header *h = &snapshot->header;
+    const unsigned char *p = snapshot->payload;
+
+    memcpy(&sv, p, sizeof(sv));
+    memcpy(&svs, p + sizeof(server_t), sizeof(svs));
+    memcpy(svs.clients, p + h->clients_offset,
+           (size_t)h->maxclientslimit * sizeof(client_t));
+    memcpy(sv.edicts, p + h->edicts_offset, (size_t)h->num_edicts * (size_t)h->pr_edict_size);
+    memcpy(pr_global_struct, p + h->globals_offset, (size_t)h->numglobals * sizeof(float));
+    dq_net_set_state((const dq_net_state *)(p + h->net_offset));
+    dq_rand_set_state(h->rng_state);
+    memcpy(&cmd_text, p + h->cmd_struct_offset, sizeof(cmd_text));
+    if (h->cmd_size)
+        memcpy(cmd_text.data, p + h->cmd_offset, h->cmd_size);
+
+    host_framecount = h->host_framecount;
+    realtime = h->realtime;
+    level_count = h->level_count;
+
+    rebuild_world_links();
+    return DQSIM_OK;
+}
+
+size_t dqsim_snapshot_size(const dqsim_snapshot *snapshot)
+{
+    return snapshot ? snapshot->header.total_size : 0;
+}
+
+void dqsim_snapshot_free(dqsim_snapshot *snapshot)
+{
+    free(snapshot);
 }
 
 void dqsim_shutdown(void)
