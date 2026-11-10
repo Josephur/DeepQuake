@@ -72,8 +72,10 @@ limits of this first policy, each with an issue:
 
 - [ ] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt)
 - [ ] Player agent learns combat; opponent pool
-- [ ] Train the Grunt against the pool; style conditioning (aggressive, defensive, covert)
-- [ ] Evaluation against the stock QuakeC Grunt under identical conditions
+- [ ] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22)
+- [ ] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22)
+- [ ] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert)
+- [ ] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level
 
 ## M5 — Play against it
 
@@ -86,4 +88,4 @@ limits of this first policy, each with an issue:
 
 - [ ] Remaining monster types, simplest first
 - [ ] Group coordination between monsters
-- [ ] Difficulty and style settings exposed as cvars
+- [ ] Style settings exposed as cvars; difficulty handicaps tuned per monster type (difficulty itself follows `skill` from M4, see ARCHITECTURE.md)

@@ -93,6 +93,39 @@ Chosen to be cheap to compute in the simulator and identical in the client:
 - **Style conditioning**: an extra input vector (aggression, caution, stealth)
   that shifts reward weights during training, so one network can be told to
   play offensively, defensively, or covertly at run time.
+- **Skill conditioning**: one more input, Quake's own `skill` setting
+  (0 easy, 1 normal, 2 hard, 3 nightmare). See "Difficulty" below.
+
+#### Difficulty
+
+Difficulty follows Quake's `skill` cvar; there is no second difficulty
+setting. A trained policy is not limited by the weapons (a Grunt's shotgun
+still spreads, a grenade still takes time to fly) but it can react
+instantly, track perfectly and lead projectiles exactly, which is neither
+fair nor fun. Difficulty therefore comes from three places:
+
+1. **Handicaps outside the model, scaled by skill.** A reaction delay
+   before a monster can respond to a newly seen enemy, and aim error added
+   to the direction it fires in. They are applied by the engine after the
+   policy has chosen, the same way in the simulator and the client, so they
+   can be tuned without retraining. Both are seeded, never wall-clock.
+2. **Fair senses.** A monster's observation holds only what that monster
+   could see or hear: enemies in line of sight, sounds within hearing
+   range, and its own memory of where the enemy was last seen. The player's
+   position through walls is never an input.
+3. **A skill input to the network.** The policy is told the skill level and
+   is trained at every level, against opponents of different strength, so
+   that easy means simpler play (less flanking, slower to press an
+   advantage) and not only a strong monster with shaky aim.
+
+The skill input exists from the first monster trained (the Grunt, M4), next
+to the style input. Adding an input later changes the observation layout
+and invalidates every checkpoint.
+
+The training objective is not to kill the player as often as possible; that
+produces the monster this section exists to avoid. Monsters are rewarded
+for being hard to beat at the given skill, and evaluated at each skill
+level against the stock QuakeC monster at the same level.
 
 **Implemented so far** (navigation only, `python/deepquake/nav.py`, whose
 docstring holds the exact layout): 48 ray distances, own velocity and
