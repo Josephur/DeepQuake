@@ -102,6 +102,52 @@ int main(int argc, char **argv)
     CHECK(moved.origin[1] - player.origin[1] > 200, "moved only %.1f units in one second",
           moved.origin[1] - player.origin[1]);
 
+    /* Entities: the level contains the player, monsters and items. */
+    static dqsim_entity entities[1024];
+    int n_entities = dqsim_get_entities(entities, 1024);
+    CHECK(n_entities > 50 && n_entities <= 1024, "entity count %d", n_entities);
+    CHECK(strcmp(entities[0].classname, "worldspawn") == 0, "entity 0 is '%s'",
+          entities[0].classname);
+    CHECK(strcmp(entities[1].classname, "player") == 0, "entity 1 is '%s'",
+          entities[1].classname);
+    int monsters = 0;
+    const dqsim_entity *deathmatch_spot = NULL;
+    for (int i = 0; i < n_entities; i++) {
+        if (entities[i].flags & 32)
+            monsters++;
+        if (strcmp(entities[i].classname, "info_player_deathmatch") == 0)
+            deathmatch_spot = &entities[i];
+    }
+    CHECK(monsters > 5, "only %d monsters on e1m1", monsters);
+    CHECK(deathmatch_spot != NULL, "no deathmatch spawn point on e1m1");
+
+    /* Teleport: allowed to a spawn point, refused inside a wall. */
+    float inside_wall[3] = {100000, 100000, 100000};
+    CHECK(dqsim_teleport_player(inside_wall, 0) == DQSIM_ERROR, "teleport into void must fail");
+    CHECK(dqsim_teleport_player(deathmatch_spot->origin, 45) == DQSIM_OK, "teleport");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "get_player");
+    CHECK(fabsf(player.origin[0] - deathmatch_spot->origin[0]) < 0.01f, "teleport position");
+
+    /* Rays: fractions in [0, 1]; in a level some hit walls and some do not. */
+    const float pitches[2] = {0, 30};
+    float rays[2 * 16];
+    CHECK(dqsim_ray_fan(pitches, 2, 16, 512, rays) == DQSIM_OK, "ray_fan");
+    int blocked = 0;
+    for (int i = 0; i < 32; i++) {
+        CHECK(rays[i] >= 0 && rays[i] <= 1, "ray %d fraction %f", i, rays[i]);
+        if (rays[i] < 1)
+            blocked++;
+    }
+    CHECK(blocked >= 16, "only %d of 32 rays hit anything", blocked);
+    /* Every downward ray must hit the floor well before 512 units. */
+    for (int i = 16; i < 32; i++)
+        CHECK(rays[i] < 0.9f, "downward ray %d did not hit the floor", i);
+
+    /* Client commands: god mode sets the flag on the player. */
+    CHECK(dqsim_client_command("god") == DQSIM_OK, "client_command");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "step_repeat");
+    CHECK(dqsim_get_entities(entities, 2) > 1 && (entities[1].flags & 64), "god mode not set");
+
     /*
      * Dying and pressing attack makes the game restart the level. Stepping
      * must carry on, and report it. On e1m3 a player who runs in circles

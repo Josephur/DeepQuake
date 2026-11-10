@@ -68,6 +68,18 @@ typedef struct dqsim_player_state {
     int32_t on_ground;
 } dqsim_player_state;
 
+/* One entity in the level, as returned by dqsim_get_entities(). */
+typedef struct dqsim_entity {
+    int32_t index;      /* entity number; 0 is the world, 1 is the player */
+    char classname[32]; /* QuakeC classname, e.g. "monster_army", "item_health" */
+    float origin[3];    /* point entities; brush entities (doors, triggers) report 0 */
+    float absmin[3];    /* world-space bounding box, valid for every entity */
+    float absmax[3];
+    float health;
+    int32_t solid;      /* 0 not, 1 trigger, 2 bbox, 3 slidebox, 4 bsp */
+    int32_t flags;      /* QuakeC FL_* bits: 32 monster, 256 item, 8 client */
+} dqsim_entity;
+
 /* Library version as "major.minor.patch". The string is static. */
 DQSIM_API const char *dqsim_version(void);
 
@@ -95,6 +107,41 @@ DQSIM_API int dqsim_load_map(const char *map, int skill, uint32_t seed);
  * continues to work across both; dqsim_level_count() tells you it happened.
  */
 DQSIM_API int dqsim_step(const dqsim_action *action);
+
+/* The same as calling dqsim_step() count times with the same action. */
+DQSIM_API int dqsim_step_repeat(const dqsim_action *action, int count);
+
+/*
+ * Send a console command as the player, executed during the next step. The
+ * server accepts the commands a real client may send, including the cheats
+ * "god", "notarget", "noclip", "fly", and "kill".
+ */
+DQSIM_API int dqsim_client_command(const char *command);
+
+/*
+ * Move the player to a position, facing yaw, with zero velocity. Fails
+ * without being fatal, and moves nothing, if the player's bounding box
+ * would be inside something solid there.
+ */
+DQSIM_API int dqsim_teleport_player(const float origin[3], float yaw);
+
+/*
+ * Cast rays from the player's eye and report how far each travels before
+ * hitting the world or a door, as a fraction of max_distance in [0, 1].
+ *
+ * There are n_pitch * n_yaw rays, written to out row by row: one row per
+ * entry of pitches (degrees, + is down), and in each row n_yaw rays evenly
+ * spaced over 360 degrees, the first along the player's view yaw and the
+ * rest counter-clockwise. Other entities (monsters, items) are ignored.
+ */
+DQSIM_API int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distance,
+                            float *out);
+
+/*
+ * Copy up to max entities that are in use into out. Returns the number of
+ * entities in use (which may exceed max), or DQSIM_ERROR.
+ */
+DQSIM_API int dqsim_get_entities(dqsim_entity *out, int max);
 
 /* Name of the map currently loaded ("e1m1"), or "" if none. */
 DQSIM_API const char *dqsim_map_name(void);

@@ -33,21 +33,40 @@ Throughput (2026-11-09, 24-thread desktop CPU, release build, 1/72 s ticks,
 
 ## M2 — Environment
 
-- [ ] Observation and action spec implemented in the engine (ray casts, entity features, sounds) (#11)
-- [ ] Python vectorised environment over worker processes (#12)
-- [ ] Random and scripted baseline agents; smoke test on a real map (`gamedata` marker) (#13)
+- [x] Simulator primitives for observations: ray casts, entity list, teleport, client commands (#11)
+- [x] Python vectorised environment over worker processes (#12)
+- [x] Random and bee-line baseline agents; real-map test (`gamedata` marker) (#13)
 
 ## M3 — Player agent: movement and navigation
 
-- [ ] PPO training loop on the RTX 3090 (#14)
-- [ ] Reach-the-goal and exploration tasks, curriculum over maps (#15)
-- [ ] Evaluation suite: success rate and time-to-goal per map (#16)
+- [x] PPO training loop on the RTX 3090 (#14)
+- [x] Goal-reaching task on a walk graph, with a distance curriculum (#15)
+- [x] Evaluation on fixed tasks against the baselines (#16)
 
-### Handoff gate
+First result (2026-11-09, `configs/nav_e1m1.toml`, 2,000,000 decisions, about
+5 minutes on the RTX 3090 with 20 simulator processes, 6,800 decisions/s).
+`eval_nav` on E1M1, 300 fixed tasks, goal 300 to 2,000 units away on foot,
+25 s limit:
 
-M0 to M3 are built interactively. Once a trained policy demonstrably does
-something in the game (for example, reaches a goal on a real map more often
-than a random agent), the remaining milestones are worked autonomously.
+| Policy | Success | Mean time to goal |
+| --- | --- | --- |
+| Random actions | 11.0% | 12.4 s |
+| Bee-line (turn to goal, run) | 72.7% | 2.3 s |
+| Trained | 96.0% | 1.7 s |
+
+### Handoff gate: passed
+
+A trained policy reaches goals on a real map far more often than both
+baselines. From here the work is tracked in the open GitHub issues. Known
+limits of this first policy, each with an issue:
+
+- The walk graph is fragmented, so no task is longer than about 2,100 units
+  and only about 17% of point pairs are connected (#18).
+- The policy has no memory and was trained on one map (#19).
+- Monsters are passive and the player invulnerable during navigation
+  training; combat comes in M4.
+- M1 leftovers: fidelity test against stock QuakeSpasm (#8), snapshot and
+  restore (#9).
 
 ## M4 — First monster brain
 

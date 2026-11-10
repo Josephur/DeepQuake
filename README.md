@@ -8,7 +8,7 @@ they can navigate levels properly, use cover, flank, retreat, ambush, and work
 together — then plugs those policies into a playable engine so you can fight
 them.
 
-**Status:** the headless simulator runs real Quake maps deterministically at over 100,000 ticks per second per core. Training comes next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Status:** the headless simulator runs real Quake maps deterministically at over 100,000 ticks per second per core, and a first policy trained in five minutes navigates E1M1 (96% of goals reached, against 73% for a run-straight-at-it baseline). Monster brains come next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## How it works
 
@@ -61,6 +61,14 @@ sim.load_map("e1m1", skill=1, seed=0)
 for _ in range(72):  # one second of game time
     sim.step(forward=400, yaw=90)
 print(sim.player())
+```
+
+Train and evaluate the navigation policy (needs an NVIDIA GPU or patience):
+
+```bash
+uv sync --extra train
+uv run python -m deepquake.train_nav configs/nav_e1m1.toml
+uv run python -m deepquake.eval_nav runs/nav_e1m1/checkpoint.pt
 ```
 
 ## Trained models

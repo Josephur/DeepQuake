@@ -94,12 +94,23 @@ Chosen to be cheap to compute in the simulator and identical in the client:
   that shifts reward weights during training, so one network can be told to
   play offensively, defensively, or covertly at run time.
 
+**Implemented so far** (navigation only, `python/deepquake/nav.py`, whose
+docstring holds the exact layout): 48 ray distances, own velocity and
+on-ground flag, and the direction and distance to the goal; four discrete
+action heads (forward/back, strafe, turn, jump) held for 6 ticks. The engine
+provides the primitives (`dqsim_ray_fan`, `dqsim_get_entities`); the
+observation vector is assembled in Python. Enemy, ally and sound features
+are not implemented yet.
+
 ### 4. Models
 
 Small recurrent policies trained from scratch with PPO, on the order of 10⁵ to
 10⁷ parameters. A language model is the wrong tool: the engine thinks at 10 to
 72 Hz for dozens of monsters, so each decision has a budget well under a
 millisecond, and the inputs are geometry and kinematics, not text.
+
+The first policy (navigation) is a plain two-layer MLP with no memory,
+about 150,000 parameters; a recurrent core is the next step.
 
 **One shared network for all monster types, not one network each.** Most of
 what a monster must learn is the same for every type: reading geometry from
@@ -129,8 +140,14 @@ reverse is not.
   combat. Monster policies are then trained against a pool of player agents
   (and scripted opponents) so they do not overfit to one opponent.
 - Curriculum: empty rooms, then real maps; single monster, then groups.
-- Export to ONNX for the client. Inference runs through ONNX Runtime with the
-  CUDA provider when a GPU is present and falls back to CPU.
+- Checkpoints are ordinary PyTorch files, which load on CUDA or CPU
+  regardless of where they were trained. For the client they will be
+  exported to ONNX and run through ONNX Runtime with the CUDA provider when
+  a GPU is present, falling back to CPU.
+- Measured on the first run: about 6,800 decisions per second with 20
+  simulator processes. The limit is stepping the environments and passing
+  data between processes, not the GPU, so a larger accelerator would not
+  make this faster; fewer, cheaper round trips would.
 
 ### 6. Distribution
 

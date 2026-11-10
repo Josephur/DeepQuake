@@ -5,6 +5,15 @@ policies, so enemies navigate, flank, retreat, ambush and coordinate instead of
 running at the player. Read `docs/ARCHITECTURE.md` for the design and
 `docs/ROADMAP.md` for the current milestone before starting work.
 
+## Where to start
+
+1. Read `docs/ROADMAP.md`: it says which milestone is current and what has
+   been measured so far.
+2. Run the checks under "Build, test, check" to confirm your checkout works.
+3. Take the lowest-numbered open issue in the current milestone that is not
+   labelled `blocked` or `needs-human` (`gh issue list --milestone "..."`),
+   and follow "Work tracking" below. One issue at a time.
+
 ## Hard rules
 
 1. **Never commit Quake game data.** `.pak`, `.bsp`, `.wad`, `.mdl`, `.spr`,
@@ -38,8 +47,16 @@ engine/                 C. Headless simulator (libdqsim) and, later, the playabl
   tests/                C tests, run by ctest
   tools/                C programs built with the library (dqsim_bench)
   third_party/quakespasm/  Vendored QuakeSpasm server code, unmodified; see its UPSTREAM.md
-python/deepquake/       Python package: sim bindings, environments, models, training
+python/deepquake/       Python package
+  sim.py                Bindings for libdqsim (one simulator per process)
+  gamedata.py           Find, check and link the user's game data
+  nav.py                Navigation task: observation, actions, reward, baselines
+  vec.py                Run many environments in worker processes
+  ppo.py                PPO and the policy network (knows nothing about Quake)
+  train_nav.py          Training entry point; eval_nav.py: evaluation entry point
+  toy.py                Simulator-free environment for testing the training code
 python/tests/           pytest
+configs/                Training configs (TOML), one per experiment
 tools/                  Repo maintenance scripts (stdlib-only Python or POSIX sh)
 docs/                   ARCHITECTURE.md, ROADMAP.md
 gamedata/               LOCAL ONLY. User's Quake data: gamedata/id1/pak0.pak, pak1.pak
@@ -58,12 +75,20 @@ git config core.hooksPath .githooks       # once per clone
 
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev
 cmake --preset release && cmake --build --preset release && ctest --preset release
-uv sync                                    # add --extra train for PyTorch
+uv sync --extra train                      # --extra train adds PyTorch (needed to train)
 uv run ruff check . && uv run ruff format --check .
 uv run pytest
 python3 tools/check_repo_hygiene.py        # forbidden files, size limits
 uv run python -m deepquake.gamedata        # verify local game data is usable
 build/release/bin/dqsim_bench gamedata e1m1 20000 24   # simulator throughput
+```
+
+Train and evaluate (output goes to `runs/<name>/`, which is gitignored):
+
+```bash
+uv run python -m deepquake.train_nav configs/nav_e1m1.toml            # add --resume to continue
+uv run python -m deepquake.eval_nav runs/nav_e1m1/checkpoint.pt       # compare with baselines
+uv run python -m deepquake.eval_nav                                   # baselines only
 ```
 
 Python loads the **release** build of the library first, so rebuild the
@@ -132,6 +157,14 @@ The issue tracker is the project's history. Use the `gh` CLI.
   agnostic (take the device from configuration). Do not install or clone
   tooling for other accelerators (for example Intel Gaudi) on this machine or
   into this repository; that is a `needs-human` decision.
+- **Experiments**: every training run has a config file in `configs/` and a
+  unique `name`. Never overwrite a previous run's directory; pick a new name.
+  Report results as numbers from `eval_nav` on its fixed task list next to
+  the random and bee-line baselines, in the issue. A training curve going up
+  is not a result; the evaluation is.
+- **Changing the observation or action layout** invalidates every saved
+  checkpoint. Do it deliberately, update the table in `nav.py`'s docstring
+  and `docs/ARCHITECTURE.md`, and retrain.
 - **Commits**: small, imperative subject line, one logical change each. `main`
   must always build and pass CI.
 - **Docs**: when a decision changes the design, update

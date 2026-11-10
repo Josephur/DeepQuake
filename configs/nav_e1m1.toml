@@ -1,0 +1,26 @@
+# Navigation on E1M1: reach a goal position. Roadmap M3.
+#   uv run python -m deepquake.train_nav configs/nav_e1m1.toml
+name = "nav_e1m1"
+map = "e1m1"
+seed = 0
+envs = 20                 # worker processes; leave a few cores for the learner
+total_steps = 2_000_000   # agent decisions (each is 6 game ticks); about 5 minutes
+device = "3090"           # substring of the CUDA device name; "" for any GPU or CPU
+checkpoint_every = 20     # updates between checkpoints
+
+[curriculum]              # the goal may be up to this far from the start, on foot (map units)
+start = 300.0
+step = 100.0              # added when the success rate reaches the threshold
+max = 2000.0
+threshold = 0.7
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256

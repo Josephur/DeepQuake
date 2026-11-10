@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+import numpy as np
+
 from . import REPO_ROOT, gamedata
 
 _LIB_NAME = "libdqsim.so"
@@ -76,6 +78,37 @@ class _PlayerState(ctypes.Structure):
     ]
 
 
+class _Entity(ctypes.Structure):
+    _fields_ = [
+        ("index", ctypes.c_int32),
+        ("classname", ctypes.c_char * 32),
+        ("origin", ctypes.c_float * 3),
+        ("absmin", ctypes.c_float * 3),
+        ("absmax", ctypes.c_float * 3),
+        ("health", ctypes.c_float),
+        ("solid", ctypes.c_int32),
+        ("flags", ctypes.c_int32),
+    ]
+
+
+#: Entity.flags bits (QuakeC FL_*).
+FL_CLIENT = 8
+FL_MONSTER = 32
+FL_ITEM = 256
+
+
+@dataclass(frozen=True)
+class Entity:
+    index: int  # 0 is the world, 1 is the player
+    classname: str  # e.g. "monster_army", "item_health", "info_player_deathmatch"
+    origin: tuple[float, float, float]  # zero for brush entities (doors, triggers)
+    absmin: tuple[float, float, float]  # world-space bounding box
+    absmax: tuple[float, float, float]
+    health: float
+    solid: int
+    flags: int
+
+
 @dataclass(frozen=True)
 class PlayerState:
     origin: tuple[float, float, float]
@@ -116,6 +149,17 @@ def _load() -> ctypes.CDLL:
     lib.dqsim_load_map.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint32]
     lib.dqsim_step.argtypes = [ctypes.POINTER(_Action)]
     lib.dqsim_get_player.argtypes = [ctypes.POINTER(_PlayerState)]
+    lib.dqsim_step_repeat.argtypes = [ctypes.POINTER(_Action), ctypes.c_int]
+    lib.dqsim_client_command.argtypes = [ctypes.c_char_p]
+    lib.dqsim_teleport_player.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_float]
+    lib.dqsim_ray_fan.argtypes = [
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_float,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    lib.dqsim_get_entities.argtypes = [ctypes.POINTER(_Entity), ctypes.c_int]
     lib.dqsim_map_name.restype = ctypes.c_char_p
     lib.dqsim_map_name.argtypes = []
     lib.dqsim_level_count.restype = ctypes.c_int
@@ -171,10 +215,72 @@ def step(
     yaw: float = 0.0,
     buttons: int = 0,
     impulse: int = 0,
+    repeat: int = 1,
 ) -> None:
-    """Advance one tick. Speeds are units per second; angles are absolute degrees."""
+    """Advance ``repeat`` ticks with the same input.
+
+    Speeds are units per second; angles are absolute degrees.
+    """
     action = _Action(forward, side, up, pitch, yaw, buttons, impulse)
-    _check(_load().dqsim_step(ctypes.byref(action)))
+    _check(_load().dqsim_step_repeat(ctypes.byref(action), repeat))
+
+
+def client_command(command: str) -> None:
+    """Send a console command as the player; it runs during the next step.
+
+    Includes the cheats ``god``, ``notarget``, ``noclip``, ``fly`` and ``kill``.
+    """
+    _check(_load().dqsim_client_command(command.encode("ascii")))
+
+
+def teleport(origin: tuple[float, float, float], yaw: float = 0.0) -> bool:
+    """Move the player. Returns False, moving nothing, if the spot is blocked."""
+    return _load().dqsim_teleport_player((ctypes.c_float * 3)(*origin), yaw) == 0
+
+
+def ray_fan(pitches: tuple[float, ...], n_yaw: int, max_distance: float) -> np.ndarray:
+    """Distances to the world along a fan of rays from the player's eye.
+
+    Returns shape ``(len(pitches), n_yaw)``, float32 in [0, 1] as a fraction
+    of ``max_distance``. Each row is one pitch (degrees, + is down); column 0
+    points along the view yaw and the rest go counter-clockwise.
+    """
+    out = np.empty((len(pitches), n_yaw), dtype=np.float32)
+    _check(
+        _load().dqsim_ray_fan(
+            (ctypes.c_float * len(pitches))(*pitches),
+            len(pitches),
+            n_yaw,
+            max_distance,
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+    )
+    return out
+
+
+def entities() -> list[Entity]:
+    """Every entity currently in the level."""
+    capacity = 1024
+    while True:
+        buffer = (_Entity * capacity)()
+        count = _load().dqsim_get_entities(buffer, capacity)
+        _check(min(count, 0))
+        if count <= capacity:
+            break
+        capacity = count
+    return [
+        Entity(
+            index=e.index,
+            classname=e.classname.decode("ascii", errors="replace"),
+            origin=tuple(e.origin),
+            absmin=tuple(e.absmin),
+            absmax=tuple(e.absmax),
+            health=e.health,
+            solid=e.solid,
+            flags=e.flags,
+        )
+        for e in buffer[:count]
+    ]
 
 
 def player() -> PlayerState:

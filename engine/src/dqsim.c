@@ -242,6 +242,118 @@ int dqsim_step(const dqsim_action *action)
     return DQSIM_OK;
 }
 
+int dqsim_step_repeat(const dqsim_action *action, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (dqsim_step(action) != DQSIM_OK)
+            return DQSIM_ERROR;
+    }
+    return DQSIM_OK;
+}
+
+int dqsim_client_command(const char *command)
+{
+    if (!command || !command[0] || strlen(command) > 100 || strpbrk(command, "\n\r"))
+        return fail("dqsim_client_command: invalid command");
+    DQ_ENTER();
+    if (!sv.active || !svs.clients[0].spawned)
+        return fail("dqsim_client_command: no map is loaded");
+    queue_command(command);
+    return DQSIM_OK;
+}
+
+int dqsim_teleport_player(const float origin[3], float yaw)
+{
+    vec3_t target;
+
+    if (!origin)
+        return fail("dqsim_teleport_player: origin is NULL");
+    DQ_ENTER();
+    if (!sv.active || !svs.clients[0].spawned)
+        return fail("dqsim_teleport_player: no map is loaded");
+
+    edict_t *ent = svs.clients[0].edict;
+    VectorCopy(origin, target);
+    trace_t trace = SV_Move(target, ent->v.mins, ent->v.maxs, target, MOVE_NORMAL, ent);
+    if (trace.startsolid || trace.allsolid)
+        return fail("dqsim_teleport_player: the position is blocked");
+
+    VectorCopy(target, ent->v.origin);
+    VectorCopy(target, ent->v.oldorigin);
+    VectorCopy(vec3_origin, ent->v.velocity);
+    VectorCopy(vec3_origin, ent->v.angles);
+    ent->v.angles[YAW] = yaw;
+    VectorCopy(ent->v.angles, ent->v.v_angle);
+    ent->v.fixangle = 1;
+    ent->v.flags = (int)ent->v.flags & ~FL_ONGROUND;
+    SV_LinkEdict(ent, false);
+    return DQSIM_OK;
+}
+
+int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distance, float *out)
+{
+    if (!pitches || !out || n_pitch < 1 || n_yaw < 1 || max_distance <= 0)
+        return fail("dqsim_ray_fan: invalid arguments");
+    DQ_ENTER();
+    if (!sv.active || !svs.clients[0].spawned)
+        return fail("dqsim_ray_fan: no map is loaded");
+
+    edict_t *ent = svs.clients[0].edict;
+    vec3_t eye, end, angles, forward, right, up;
+    VectorAdd(ent->v.origin, ent->v.view_ofs, eye);
+
+    for (int p = 0; p < n_pitch; p++) {
+        for (int y = 0; y < n_yaw; y++) {
+            angles[PITCH] = pitches[p];
+            angles[YAW] = ent->v.v_angle[YAW] + 360.0f * (float)y / (float)n_yaw;
+            angles[ROLL] = 0;
+            AngleVectors(angles, forward, right, up);
+            VectorMA(eye, max_distance, forward, end);
+            trace_t trace = SV_Move(eye, vec3_origin, vec3_origin, end, MOVE_NOMONSTERS, ent);
+            out[p * n_yaw + y] = trace.startsolid ? 0.0f : trace.fraction;
+        }
+    }
+    return DQSIM_OK;
+}
+
+/* Separate from dqsim_get_entities so no local lives across its setjmp. */
+static int copy_entities(dqsim_entity *out, int max)
+{
+    int count = 0;
+
+    for (int i = 0; i < sv.num_edicts; i++) {
+        const edict_t *ent = EDICT_NUM(i);
+        if (ent->free)
+            continue;
+        if (count < max) {
+            dqsim_entity *e = &out[count];
+            memset(e, 0, sizeof(*e));
+            e->index = i;
+            q_strlcpy(e->classname, PR_GetString(ent->v.classname), sizeof(e->classname));
+            for (int k = 0; k < 3; k++) {
+                e->origin[k] = ent->v.origin[k];
+                e->absmin[k] = ent->v.absmin[k];
+                e->absmax[k] = ent->v.absmax[k];
+            }
+            e->health = ent->v.health;
+            e->solid = (int)ent->v.solid;
+            e->flags = (int)ent->v.flags;
+        }
+        count++;
+    }
+    return count;
+}
+
+int dqsim_get_entities(dqsim_entity *out, int max)
+{
+    if ((!out && max > 0) || max < 0)
+        return fail("dqsim_get_entities: invalid arguments");
+    DQ_ENTER();
+    if (!sv.active)
+        return fail("dqsim_get_entities: no map is loaded");
+    return copy_entities(out, max);
+}
+
 const char *dqsim_map_name(void)
 {
     if (state != STATE_READY || !sv.active)
