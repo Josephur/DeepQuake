@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# Quake game data: proprietary id Software assets. NEVER commit these.
+# Enforced a second time by tools/check_repo_hygiene.py (pre-commit + CI).
+# ---------------------------------------------------------------------------
+/gamedata/*
+!/gamedata/README.md
+*.pak
+*.PAK
+*.bsp
+*.wad
+*.mdl
+*.spr
+*.lmp
+*.dem
+*.sav
+progs.dat
+id1/
+hipnotic/
+rogue/
+
+# ---------------------------------------------------------------------------
+# Trained weights, checkpoints, run output: distributed via releases, not git.
+# ---------------------------------------------------------------------------
+/models/*
+!/models/README.md
+/runs/
+/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.npz
+wandb/
+tensorboard/
+*.tfevents.*
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+/build/
+compile_commands.json
+*.o
+*.so
+*.a
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+
+# ---------------------------------------------------------------------------
+# Local-only: secrets, editor and agent state
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.local
+*.local.*
+.claude/settings.local.json
+.vscode/
+.idea/
+.DS_Store
