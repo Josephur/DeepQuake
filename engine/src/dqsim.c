@@ -75,10 +75,18 @@ const char *dqsim_last_error(void)
     return dq_error;
 }
 
-/* The server portion of upstream _Host_Frame, with a fixed frame time. */
+/* The server portion of upstream _Host_Frame, with a fixed frame time.
+ *
+ * host_frametime is rounded through a float first because that is what a
+ * stock server does: the frame time comes from the host_framerate cvar, and
+ * cvar_t stores a float. Feeding the raw double makes products such as
+ * sv_gravity * host_frametime land on the other side of a float rounding
+ * boundary, drifting one ULP per tick from stock Quake, and the physics
+ * amplifies that at contact boundaries (see the fidelity test).
+ */
 static void run_frame(void)
 {
-    host_frametime = tick_seconds;
+    host_frametime = (double)(float)tick_seconds;
     realtime += tick_seconds;
     Cbuf_Execute();
     if (sv.active)

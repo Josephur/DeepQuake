@@ -39,6 +39,9 @@ tensorboard/
 # Build output
 # ---------------------------------------------------------------------------
 /build/
+# Fidelity reference: pristine upstream QuakeSpasm, fetched and built locally
+# by tools/fetch_fidelity_reference.sh. Never committed.
+/engine/.fidelity/
 compile_commands.json
 *.o
 *.so

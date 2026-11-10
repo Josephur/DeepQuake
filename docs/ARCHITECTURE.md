@@ -68,6 +68,25 @@ into both the headless library and the playable client, so training and play
 share physics by construction. Quake Enhanced (KEX) is closed source and is
 only a source of `id1` data.
 
+**Fidelity is measured, not assumed.** `engine/tests/test_fidelity.c` (ctest
+name `dqsim.fidelity`) starts a second, unmodified QuakeSpasm built from the
+same vendored commit by `tools/fetch_fidelity_reference.sh`, and drives both
+engines with the same 775-tick input script. A minimal NetQuake client in the
+test performs the real sign-on, sends each tick as the same `clc_move` bytes
+libdqsim queues, and reads the player's origin back off the wire. Origins must
+agree within the protocol's 1/16-unit quantisation at every tick, and the
+health and on-ground flags exactly. A change to the observation or action
+layout is cheap; a change to the movement path is not, because this test
+fails.
+
+The reference runs from a scratch basedir (a temp directory with `id1`
+symlinked to the user's data and a `test` game directory holding an
+`autoexec.cfg`), never from `+` commands: QuakeSpasm rebuilds the command
+line into a 256-byte buffer and `stuffcmds()` parses that truncated copy, so
+with long absolute paths a trailing `+map` is silently dropped and the server
+falls back to `map start`. The test asserts the world model announced in
+`svc_serverinfo` is `maps/e1m1.bsp` for the same reason.
+
 ### 2. Brain hook
 
 The point where a policy takes over from QuakeC. Monster think functions

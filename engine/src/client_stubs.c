@@ -33,25 +33,36 @@ int gl_warpimagesize;
 void (*GL_GenerateMipmap)(GLenum target);
 
 /*
- * Exception 1: V_CalcRoll is used by the server (sv_user.c) to set the
- * player's roll angle, so it must compute the real value. Copied from
- * upstream view.c, with cl_rollangle and cl_rollspeed at their defaults.
+ * Exception 1: V_CalcRoll is called by the server (sv_user.c) to set the
+ * player's roll angle, and that roll rotates the movement direction in
+ * SV_AirMove, so it must match a real server exactly.
+ *
+ * In a dedicated build (libdqsim is one) V_Init never runs, so the client
+ * cvars cl_rollangle and cl_rollspeed are never registered: their value
+ * stays at the zero Cvar_RegisterVariable would have parsed out of the
+ * default string. Upstream's V_CalcRoll therefore returns zero and the
+ * player never rolls. Declaring the two cvars unregistered here reproduces
+ * that exactly, instead of inventing a listen-server roll the server side of
+ * a dedicated engine never applies.
  */
+cvar_t cl_rollspeed = {"cl_rollspeed", "200", CVAR_NONE};
+cvar_t cl_rollangle = {"cl_rollangle", "2.0", CVAR_NONE};
+
 float V_CalcRoll(vec3_t angles, vec3_t velocity)
 {
-    const float rollangle = 2.0f;
-    const float rollspeed = 200.0f;
     vec3_t forward, right, up;
+    float side, sign, value;
 
     AngleVectors(angles, forward, right, up);
-    float side = DotProduct(velocity, right);
-    float sign = side < 0 ? -1 : 1;
-    side = fabs(side);
+    side = DotProduct(velocity, right);
+    sign = side < 0 ? -1 : 1;
+    side = fabsf(side);
 
-    if (side < rollspeed)
-        side = side * rollangle / rollspeed;
+    value = cl_rollangle.value;
+    if (side < cl_rollspeed.value)
+        side = side * value / cl_rollspeed.value;
     else
-        side = rollangle;
+        side = value;
 
     return side * sign;
 }
