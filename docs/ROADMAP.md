@@ -134,7 +134,7 @@ recovers the old scores is future work, not part of #26.
 - [x] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt) (#31)
 - [x] Research the combat task (episode, reward, termination, opponent pool); the training issue follows from it (#32)
 - [x] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22) (#33)
-- [ ] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22) (#34)
+- [x] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22) (#34)
 - [ ] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert) (#35)
 - [ ] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level (#36)
 

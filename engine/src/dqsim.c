@@ -548,6 +548,39 @@ static char hook_prefix[32]; /* QuakeC state prefix, e.g. "army_" */
 static float hook_stand_frame, hook_run_frame;
 static int hook_run_frames;
 static unsigned hook_anim_tick;
+/* Skill handicaps (#34): schedule at nomination, overridable for tests. */
+static dq_handicap_state hook_handicap;
+static int hook_skill;
+static int hook_override_ticks = -1;   /* -1: use the schedule */
+static float hook_override_aim = -1.0f;
+static func_t hook_fire_think; /* the attack-sequence think that fires, 0 = none */
+
+static void effective_handicap(int *reaction_ticks, float *aim_error_deg)
+{
+    dq_handicap_schedule(hook_skill, reaction_ticks, aim_error_deg);
+    if (hook_override_ticks >= 0)
+        *reaction_ticks = hook_override_ticks;
+    if (hook_override_aim >= 0.0f)
+        *aim_error_deg = hook_override_aim;
+}
+
+int dqsim_handicap_for_skill(int skill, dqsim_handicap *out)
+{
+    if (!out || skill < 0 || skill > 3)
+        return fail("dqsim_handicap_for_skill: skill must be 0-3 and out non-NULL");
+    dq_handicap_schedule(skill, &out->reaction_ticks, &out->aim_error_deg);
+    return DQSIM_OK;
+}
+
+int dqsim_set_handicap_override(int32_t reaction_ticks, float aim_error_deg)
+{
+    DQ_ENTER();
+    if (hook_index <= 0)
+        return fail("dqsim_set_handicap_override: no monster is nominated");
+    hook_override_ticks = reaction_ticks;
+    hook_override_aim = aim_error_deg;
+    return DQSIM_OK;
+}
 static int progs_is_stock;
 
 static void hook_on_level_start(void)
@@ -555,6 +588,10 @@ static void hook_on_level_start(void)
     hook_callback = NULL;
     hook_user = NULL;
     hook_index = 0;
+    hook_fire_think = 0;
+    hook_override_ticks = -1;
+    hook_override_aim = -1.0f;
+    dq_handicap_reset(&hook_handicap);
     /* Identity of the progs this level actually loaded: the raw file
      * bytes through the engine's search path (a game directory shadows
      * id1), hashed with its length. Reading the in-memory progs instead
@@ -582,6 +619,37 @@ static func_t find_function(const char *name)
     for (int i = 1; i < progs->numfunctions; i++)
         if (strcmp(PR_GetString(pr_functions[i].s_name), name) == 0)
             return i;
+    return 0;
+}
+
+/* The attack-sequence think that actually fires: the "<prefix>atkN" state
+ * function whose statements call "<prefix>fire" (#34). 0 when there is
+ * none (a melee monster), in which case aim error has nothing to act on. */
+static func_t find_fire_think(void)
+{
+    char name[40];
+    q_snprintf(name, sizeof(name), "%sfire", hook_prefix);
+    func_t fire = find_function(name);
+    if (!fire)
+        return 0;
+    for (int n = 1; n <= 24; n++) {
+        q_snprintf(name, sizeof(name), "%satk%d", hook_prefix, n);
+        func_t candidate = find_function(name);
+        if (!candidate)
+            continue;
+        dfunction_t *function = &pr_functions[candidate];
+        for (int s = 0; s < 512; s++) {
+            dstatement_t *statement = &pr_statements[function->first_statement + s];
+            if (statement->op == OP_DONE || statement->op == OP_RETURN)
+                break;
+            if (statement->op >= OP_CALL0 && statement->op <= OP_CALL8) {
+                func_t called;
+                memcpy(&called, &pr_globals[statement->a], sizeof(called));
+                if (called == fire)
+                    return candidate;
+            }
+        }
+    }
     return 0;
 }
 
@@ -723,6 +791,11 @@ static void hook_apply(edict_t *ent, func_t fnum, const dqsim_hook_observation *
         q_snprintf(attack_name, sizeof(attack_name), "%satk1", hook_prefix);
         func_t attack = enemy ? find_function(attack_name) : 0;
         if (attack && (!cooldown || sv.time >= cooldown->_float)) {
+            int reaction_ticks;
+            float aim_error_deg;
+            effective_handicap(&reaction_ticks, &aim_error_deg);
+            (void)reaction_ticks;
+            dq_handicap_roll_aim(&hook_handicap, aim_error_deg);
             ent->v.enemy = EDICT_TO_PROG(enemy);
             pr_global_struct->self = EDICT_TO_PROG(ent);
             pr_global_struct->other = EDICT_TO_PROG(enemy);
@@ -749,17 +822,60 @@ void dqsim_hook_execute_program(func_t fnum)
 {
     if (hook_callback && hook_index > 0 && fnum > 0 && progs_is_stock) {
         edict_t *ent = EDICT_NUM(hook_index);
-        if (!ent->free && ent->v.health > 0 && pr_global_struct->self == EDICT_TO_PROG(ent) &&
-            (func_t)ent->v.think == fnum && ent->v.nextthink == 0 && is_decision_think(fnum)) {
-            dqsim_hook_observation obs;
-            hook_observe(ent, &obs);
-            dqsim_hook_action action;
-            memset(&action, 0, sizeof(action));
-            action.desired_yaw = ent->v.angles[YAW];
-            hook_callback(&obs, &action, hook_user);
-            if (!ent->free)
-                hook_apply(ent, fnum, &obs, &action);
-            return;
+        if (!ent->free && pr_global_struct->self == EDICT_TO_PROG(ent)) {
+            /* The pending aim error acts where the shot is actually aimed:
+             * the fire think reads the enemy's origin, so offset that
+             * origin tangentially for this one execution and restore it. */
+            if (hook_handicap.aim_pending && fnum == hook_fire_think && ent->v.enemy) {
+                edict_t *enemy = PROG_TO_EDICT(ent->v.enemy);
+                vec3_t saved, delta;
+                VectorCopy(enemy->v.origin, saved);
+                VectorSubtract(enemy->v.origin, ent->v.origin, delta);
+                float distance = sqrtf(delta[0] * delta[0] + delta[1] * delta[1]);
+                if (distance > 1.0f) {
+                    float along = distance * tanf(hook_handicap.aim_yaw_deg *
+                                                  3.14159265f / 180.0f);
+                    enemy->v.origin[0] += -delta[1] / distance * along;
+                    enemy->v.origin[1] += delta[0] / distance * along;
+                    enemy->v.origin[2] += distance * tanf(hook_handicap.aim_pitch_deg *
+                                                          3.14159265f / 180.0f);
+                }
+                hook_handicap.aim_pending = 0;
+                PR_ExecuteProgram(fnum);
+                VectorCopy(saved, enemy->v.origin);
+                return;
+            }
+            if (ent->v.health > 0 && (func_t)ent->v.think == fnum && ent->v.nextthink == 0 &&
+                is_decision_think(fnum)) {
+                dqsim_hook_observation obs;
+                hook_observe(ent, &obs);
+                int visible_enemy = -1;
+                for (int i = 0; i < obs.visible_count; i++)
+                    if (obs.visible[i].flags & FL_CLIENT) {
+                        visible_enemy = obs.visible[i].index;
+                        break;
+                    }
+                int reaction_ticks;
+                float aim_error_deg;
+                effective_handicap(&reaction_ticks, &aim_error_deg);
+                (void)aim_error_deg;
+                int respond = dq_handicap_may_respond(&hook_handicap, visible_enemy, obs.time,
+                                                      reaction_ticks, host_frametime);
+                dqsim_hook_action action;
+                memset(&action, 0, sizeof(action));
+                action.desired_yaw = ent->v.angles[YAW];
+                hook_callback(&obs, &action, hook_user);
+                if (!ent->free) {
+                    if (!respond) {
+                        /* Inside the reaction delay: the callback ran,
+                         * but nothing is applied (no turn, move or attack). */
+                        memset(&action, 0, sizeof(action));
+                        action.desired_yaw = ent->v.angles[YAW];
+                    }
+                    hook_apply(ent, fnum, &obs, &action);
+                }
+                return;
+            }
         }
     }
     PR_ExecuteProgram(fnum);
@@ -787,7 +903,12 @@ int dqsim_set_policy_hook(int entity_index, dqsim_hook_callback callback, void *
     hook_user = user;
     hook_index = entity_index;
     hook_anim_tick = 0;
+    hook_skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
+    hook_override_ticks = -1;
+    hook_override_aim = -1.0f;
+    dq_handicap_reset(&hook_handicap);
     q_snprintf(hook_prefix, sizeof(hook_prefix), "%s_", classname + 8);
+    hook_fire_think = find_fire_think();
     char name[40];
     q_snprintf(name, sizeof(name), "%sstand1", hook_prefix);
     hook_stand_frame = state_frame(find_function(name));
@@ -811,6 +932,8 @@ int dqsim_clear_policy_hook(void)
     hook_callback = NULL;
     hook_user = NULL;
     hook_index = 0;
+    hook_fire_think = 0;
+    dq_handicap_reset(&hook_handicap);
     return DQSIM_OK;
 }
 
@@ -906,6 +1029,7 @@ uint64_t dqsim_state_hash(void)
         if (!ent->free)
             hash = fnv1a(hash, &ent->v, fields_size);
     }
+    hash = fnv1a(hash, &hook_handicap, sizeof(hook_handicap));
     return hash;
 }
 
@@ -937,6 +1061,7 @@ typedef struct dq_snapshot_header {
     uint32_t level_serial;
     char map[64];
     uint64_t rng_state;
+    dq_handicap_state handicap; /* policy-hook handicap state (#34) */
     double realtime;
     int host_framecount;
     int level_count;
@@ -1028,6 +1153,7 @@ int dqsim_snapshot_save(dqsim_snapshot **out)
     h->level_serial = level_serial;
     q_strlcpy(h->map, sv.name, sizeof(h->map));
     h->rng_state = dq_rand_state();
+    h->handicap = hook_handicap;
     h->realtime = realtime;
     h->host_framecount = host_framecount;
     h->level_count = level_count;
@@ -1103,6 +1229,7 @@ int dqsim_snapshot_restore(const dqsim_snapshot *snapshot)
     memcpy(pr_global_struct, p + h->globals_offset, (size_t)h->numglobals * sizeof(float));
     dq_net_set_state((const dq_net_state *)(p + h->net_offset));
     dq_rand_set_state(h->rng_state);
+    hook_handicap = h->handicap;
     memcpy(&cmd_text, p + h->cmd_struct_offset, sizeof(cmd_text));
     if (h->cmd_size)
         memcpy(cmd_text.data, p + h->cmd_offset, h->cmd_size);

@@ -313,6 +313,33 @@ def progs_is_stock() -> bool:
     return bool(result)
 
 
+class _Handicap(ctypes.Structure):
+    _fields_ = [("reaction_ticks", ctypes.c_int32), ("aim_error_deg", ctypes.c_float)]
+
+
+def handicap_for_skill(skill: int) -> tuple[int, float]:
+    """The engine's handicap schedule for a Quake skill level (#34).
+
+    Returns ``(reaction_ticks, aim_error_degrees)``; enforcement is in the
+    engine, this is for inspection and configuration only.
+    """
+    lib = _load()
+    lib.dqsim_handicap_for_skill.argtypes = [ctypes.c_int, ctypes.POINTER(_Handicap)]
+    lib.dqsim_set_handicap_override.argtypes = [ctypes.c_int32, ctypes.c_float]
+    out = _Handicap()
+    _check(lib.dqsim_handicap_for_skill(skill, ctypes.byref(out)))
+    return out.reaction_ticks, out.aim_error_deg
+
+
+def set_handicap_override(reaction_ticks: int, aim_error_deg: float) -> None:
+    """Override the nominated monster's handicap schedule (for tests).
+
+    A negative value restores the schedule for that component.
+    """
+    handicap_for_skill(0)  # registers the argtypes
+    _check(_load().dqsim_set_handicap_override(reaction_ticks, aim_error_deg))
+
+
 def load_map(name: str, *, skill: int = 1, seed: int = 0) -> None:
     """Load a map, seed the game's random numbers, and spawn the player."""
     _check(_load().dqsim_load_map(name.encode("ascii"), skill, seed & 0xFFFFFFFF))

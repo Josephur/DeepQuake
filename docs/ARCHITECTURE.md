@@ -246,6 +246,16 @@ fair nor fun. Difficulty therefore comes from three places:
    to the direction it fires in. They are applied by the engine after the
    policy has chosen, the same way in the simulator and the client, so they
    can be tuned without retraining. Both are seeded, never wall-clock.
+   **Implemented (#34)** for policy-driven monsters in
+   `engine/src/handicap.c` (a unit the client will compile unchanged):
+   the schedule is 36/18/9/0 ticks of reaction delay and 12°/6°/3°/0° of
+   aim error for skill 0–3 (`dqsim_handicap_for_skill`). During the delay
+   the callback still runs but its action is not applied; the aim error
+   is rolled from the seeded stream once per attack and applied where
+   the QuakeC attack actually aims — at its fire frame, from the enemy's
+   position — and pending handicap state is part of snapshots and the
+   state hash. Nightmare is unhandicapped because stock QuakeC already
+   refires almost immediately there.
 2. **Fair senses.** A monster's observation holds only what that monster
    could see or hear: enemies in line of sight, sounds within hearing
    range, and its own memory of where the enemy was last seen. The player's

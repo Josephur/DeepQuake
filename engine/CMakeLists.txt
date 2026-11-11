@@ -62,6 +62,7 @@ target_compile_options(quakespasm_phys PRIVATE -w -fno-strict-aliasing)
 add_library(dqsim SHARED
   src/client_stubs.c
   src/dqsim.c
+  src/handicap.c
   src/net_fake.c
   src/platform.c
   src/rng.c
@@ -117,6 +118,9 @@ if(BUILD_TESTING)
   dqsim_add_test(test_hook)
   add_test(NAME dqsim.hook COMMAND test_hook ${DQSIM_TEST_GAMEDATA})
   set_tests_properties(dqsim.hook PROPERTIES SKIP_RETURN_CODE 77 LABELS gamedata)
+
+  dqsim_add_test(test_handicap)
+  add_test(NAME dqsim.handicap COMMAND test_handicap)
 
   # Fidelity against pristine upstream QuakeSpasm, built by
   # tools/fetch_fidelity_reference.sh (local only; skips when absent).

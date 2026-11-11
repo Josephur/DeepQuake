@@ -258,6 +258,32 @@ DQSIM_API int dqsim_clear_policy_hook(void);
  */
 DQSIM_API int dqsim_progs_is_stock(void);
 
+/*
+ * Skill handicaps for policy-driven monsters (#34, design #22), applied
+ * by the engine after the policy has chosen: a reaction delay (in ticks
+ * at the simulation's tick rate) before a monster may respond to a newly
+ * seen enemy — its callback still runs, its action is not applied — and
+ * an aim error in degrees, rolled from the seeded random stream once per
+ * attack and applied at the moment the QuakeC attack actually fires.
+ * Skill 3 (nightmare) is unhandicapped, mirroring stock QuakeC, whose
+ * nightmare monsters already refire almost immediately. Stock QuakeC
+ * monsters are never handicapped this way.
+ */
+typedef struct dqsim_handicap {
+    int32_t reaction_ticks;
+    float aim_error_deg;
+} dqsim_handicap;
+
+/* The schedule for a Quake skill level (0-3). */
+DQSIM_API int dqsim_handicap_for_skill(int skill, dqsim_handicap *out);
+
+/*
+ * Override the schedule for the currently nominated monster, for tests:
+ * any negative value restores the schedule for that component. The
+ * override lasts until cleared or until the next level starts.
+ */
+DQSIM_API int dqsim_set_handicap_override(int32_t reaction_ticks, float aim_error_deg);
+
 /* Name of the map currently loaded ("e1m1"), or "" if none. */
 DQSIM_API const char *dqsim_map_name(void);
 
