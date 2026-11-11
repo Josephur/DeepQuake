@@ -29,8 +29,12 @@ slice                 size   meaning
 ``[107]``             1      decisions remaining, / :data:`timeout_steps`
 ====================  =====  ==============================================
 
-Action (5 integers, :data:`ACTION_NVEC`): the navigation heads (forward,
-strafe, turn, jump) plus fire {no, yes}. Reward is selected by name
+Action (6 integers, :data:`ACTION_NVEC`): the navigation heads (forward,
+strafe, turn with the finer :data:`TURN_DEGREES`, jump) plus fire
+{no, yes} and a pitch head that accumulates into the aim pitch
+(:data:`PITCH_DEGREES`, clamped to +-45 degrees). The finer turn steps
+and the pitch head came from #40: precise aim halved the scripted
+time-to-kill on the Grunt and doubled it on the Ogre. Reward is selected by name
 (:data:`REWARDS`): ``damage`` pays damage dealt minus taken (per 100)
 plus +1 for the kill and -1 for dying; ``survival`` adds a small
 per-decision bonus on top; ``sparse`` pays only the terminal +-1.
@@ -46,7 +50,9 @@ import numpy as np
 from . import nav, sim
 
 OBS_DIM = 2 * len(nav.RAY_PITCHES) * nav.RAY_YAWS + 12
-ACTION_NVEC = (3, 3, 5, 2, 2)
+ACTION_NVEC = (3, 3, 7, 2, 2, 3)
+TURN_DEGREES = (-30.0, -15.0, -5.0, 0.0, 5.0, 15.0, 30.0)
+PITCH_DEGREES = (-10.0, 0.0, 10.0)
 REWARDS = ("damage", "survival", "sparse")
 
 FRAME_SKIP = nav.FRAME_SKIP
@@ -85,6 +91,7 @@ class CombatEnv:
         # Combat episodes do their own fresh loads without god/notarget.
         self.points = nav.NavEnv(map_name, seed=seed).points
         self.yaw = 0.0
+        self.pitch = 0.0
         self.steps = 0
         self.enemy_index = -1
         self._enemy_cached: sim.Entity | None = None
@@ -144,6 +151,7 @@ class CombatEnv:
             self.enemy_index = enemy.index
             self._enemy_cached = enemy
             self.yaw = yaw
+            self.pitch = 0.0
             self.steps = 0
             state = sim.player()
             self._prev_player_health = state.health
@@ -180,6 +188,7 @@ class CombatEnv:
             self.enemy_index = enemy.index
             self._enemy_cached = enemy
             self.yaw = yaw
+            self.pitch = 0.0
             self.steps = 0
             state = sim.player()
             self._prev_player_health = state.health
@@ -199,11 +208,13 @@ class CombatEnv:
         return self._enemy_cached
 
     def step(self, action: np.ndarray) -> nav.StepResult:
-        forward, strafe, turn, jump, fire = (int(a) for a in action)
-        self.yaw = (self.yaw + nav.TURN_DEGREES[turn]) % 360.0
+        forward, strafe, turn, jump, fire, pitch = (int(a) for a in action)
+        self.yaw = (self.yaw + TURN_DEGREES[turn]) % 360.0
+        self.pitch = float(np.clip(self.pitch + PITCH_DEGREES[pitch], -45.0, 45.0))
         sim.step(
             forward=(forward - 1) * nav.RUN_SPEED,
             side=(1 - strafe) * nav.RUN_SPEED,
+            pitch=self.pitch,
             yaw=self.yaw,
             buttons=sim.BUTTON_ATTACK if fire else 0,
             repeat=FRAME_SKIP,
@@ -326,16 +337,16 @@ def shooter_policy(obs: np.ndarray) -> np.ndarray:
     if obs[base + 8] > 0:
         angle = math.degrees(math.atan2(obs[base + 5], obs[base + 4]))
         if angle > 20:
-            turn = 4
+            turn = 6
         elif angle > 5:
-            turn = 3
+            turn = 5
         elif angle < -20:
             turn = 0
         elif angle < -5:
             turn = 1
         else:
-            turn = 2
-        return np.array([2, 1, turn, 0, 1])
+            turn = 3
+        return np.array([2, 1, turn, 0, 1, 1])
     if obs[0] < 0.1:  # the ray straight ahead ends at a wall: turn away
-        return np.array([2, 1, 4, 0, 0])
-    return np.array([2, 1, 2, 0, 0])
+        return np.array([2, 1, 6, 0, 0, 1])
+    return np.array([2, 1, 3, 0, 0, 1])

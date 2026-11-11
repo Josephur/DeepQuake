@@ -13,7 +13,7 @@ class _StubEnv:
 
 def test_reward_names_and_sizes():
     assert combat.REWARDS == ("damage", "survival", "sparse")
-    assert combat.OBS_DIM == 108 and combat.ACTION_NVEC == (3, 3, 5, 2, 2)
+    assert combat.OBS_DIM == 108 and combat.ACTION_NVEC == (3, 3, 7, 2, 2, 3)
     with pytest.raises(ValueError, match="reward"):
         combat.CombatEnv("e1m1", reward="nope")
 
@@ -32,7 +32,7 @@ from deepquake import combat, sim
 sim.init()
 env = combat.CombatEnv("e1m1", seed=3)
 obs = env.reset()
-result = env.step(np.array([2, 1, 2, 0, 0]))
+result = env.step(np.array([2, 1, 3, 0, 0, 1]))
 tasks = combat.make_tasks(env, 10, 99)
 random = combat.evaluate(env, combat.random_policy(np.random.default_rng(0)), tasks)
 shooter = combat.evaluate(env, combat.shooter_policy, tasks)

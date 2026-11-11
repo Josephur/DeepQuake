@@ -1,0 +1,33 @@
+# Third combat pool run (#38, action change from #40): precise aim
+# halved the scripted time-to-kill and doubled the scripted Ogre win
+# rate, so the action layout gains finer turn steps
+# {-30,-15,-5,0,+5,+15,+30} and a pitch head {-10,0,+10} accumulated
+# to +-45 degrees. ACTION_NVEC is now (3, 3, 7, 2, 2, 3); earlier
+# combat checkpoints do not load into it. Everything else matches
+# combat_pool: same opponents, sparse reward, original placement
+# (200-600 units, line of sight broken).
+#   uv run python -m deepquake.train_combat configs/combat_pool3.toml
+name = "combat_pool3"
+opponents = [
+  { map = "e1m1", monster = "monster_army" },
+  { map = "e1m4", monster = "monster_ogre" },
+]
+reward = "sparse"
+seed = 0
+envs = 16
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
