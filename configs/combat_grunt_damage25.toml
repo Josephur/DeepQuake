@@ -1,0 +1,27 @@
+# Damage-reward comparison for #39: is sparse-reward credit assignment
+# the binding constraint? Same Grunt task as combat_pool's e1m1 half,
+# damage reward instead of sparse, 2.5M decisions (the pool run's
+# per-opponent share of its first 5M).
+#   uv run python -m deepquake.train_combat configs/combat_grunt_damage25.toml
+name = "combat_grunt_damage25"
+map = "e1m1"
+monster = "monster_army"
+reward = "damage"
+seed = 0
+envs = 8
+total_steps = 2500000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
