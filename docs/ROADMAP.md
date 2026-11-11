@@ -64,7 +64,8 @@ limits of this first policy, each with an issue:
   work on maps they have never seen (ARCHITECTURE.md, "Map independence"),
   so #19 trains on many maps and reports held-out maps separately.
   **Fixed 2026-11-10 (#19): see the multi-map result below.**
-- No map outside id's own has ever been loaded (#28).
+- No map outside id's own has ever been loaded (#28). **Fixed 2026-11-11
+  (#28): a generated map loads, runs and navigates — see \`bspgen\`.**
 - Monsters are passive and the player invulnerable during navigation
   training; combat comes in M4.
 
