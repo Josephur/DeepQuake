@@ -484,6 +484,10 @@ static void hook_observe(edict_t *ent, dqsim_hook_observation *obs)
     obs->health = ent->v.health;
     obs->on_ground = ((int)ent->v.flags & FL_ONGROUND) != 0;
     obs->waterlevel = (int)ent->v.waterlevel;
+    eval_t *cooldown = GetEdictFieldValue(ent, "attack_finished");
+    obs->attack_cooldown = cooldown && cooldown->_float > (float)sv.time
+                               ? cooldown->_float - (float)sv.time
+                               : 0.0f;
 
     vec3_t eye;
     VectorAdd(ent->v.origin, ent->v.view_ofs, eye);

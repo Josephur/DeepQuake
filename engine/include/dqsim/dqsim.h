@@ -219,6 +219,7 @@ typedef struct dqsim_hook_observation {
     unsigned char ray_kinds[DQSIM_HOOK_RAYS];
     int32_t visible_count; /* entries used in visible[], nearest first */
     dqsim_hook_visible visible[DQSIM_HOOK_MAX_VISIBLE];
+    float attack_cooldown; /* seconds until QuakeC lets it attack again */
 } dqsim_hook_observation;
 
 typedef struct dqsim_hook_action {

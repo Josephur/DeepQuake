@@ -128,6 +128,7 @@ class _HookObservation(ctypes.Structure):
         ("ray_kinds", ctypes.c_ubyte * (len(HOOK_RAY_PITCHES) * HOOK_RAY_YAWS)),
         ("visible_count", ctypes.c_int32),
         ("visible", _HookVisible * HOOK_MAX_VISIBLE),
+        ("attack_cooldown", ctypes.c_float),
     ]
 
 
@@ -168,6 +169,7 @@ class HookObservation:
     rays: np.ndarray  # (len(HOOK_RAY_PITCHES), HOOK_RAY_YAWS) fractions
     ray_kinds: np.ndarray  # same shape, SURFACE_* values
     visible: tuple[HookVisible, ...]  # nearest first
+    attack_cooldown: float = 0.0  # seconds until QuakeC lets it attack again
 
 
 @dataclass
@@ -408,6 +410,7 @@ def set_policy_hook(entity_index: int, policy) -> None:
                 )
                 for v in raw.visible[: raw.visible_count]
             ),
+            attack_cooldown=float(raw.attack_cooldown),
         )
         action = policy(observation)
         if action is not None:

@@ -191,6 +191,17 @@ Chosen to be cheap to compute in the simulator and identical in the client:
 - **Skill conditioning**: one more input, Quake's own `skill` setting
   (0 easy, 1 normal, 2 hard, 3 nightmare). See "Difficulty" below.
 
+**Implemented for the monster (#33)** (`python/deepquake/monster.py`,
+whose docstring holds the exact layout): the brain hook's ray fan and
+surface kinds and the monster's own velocity, ground and water state,
+health and QuakeC attack cooldown come first; then the enemy's bearing,
+height and distance and its health — only while the hook sees it — and a
+last-seen memory (bearing, height, distance, age) that fades after five
+seconds; finally `skill / 3` and the style vector (aggression, caution,
+stealth). Nothing in the vector is absolute, per-map, or visible through
+walls: a test places the player behind a wall on an id map and on the
+generated map and asserts the enemy channels read "not visible".
+
 #### Map independence
 
 A trained model must work on any map, including a custom map nobody on this
