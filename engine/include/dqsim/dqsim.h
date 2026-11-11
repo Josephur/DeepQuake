@@ -48,6 +48,10 @@ typedef struct dqsim_config {
     int heap_mb;         /* engine heap size; 0 selects the default (128) */
     double tick_seconds; /* simulated time per step; 0 selects the default */
     int verbose;         /* non-zero: print engine console output to stderr */
+    const char *game;    /* optional game directory: a single directory name under
+                            basedir, passed to the engine as -game (#37). NULL or ""
+                            means id1 only. Names with path separators, "..", or a
+                            leading '-' are rejected by dqsim_init. */
 } dqsim_config;
 
 /* One step of player input, the same quantities a Quake client sends. */
@@ -244,6 +248,15 @@ DQSIM_API int dqsim_set_policy_hook(int entity_index, dqsim_hook_callback callba
 
 /* Remove the nomination, if any. Stock AI makes every decision again. */
 DQSIM_API int dqsim_clear_policy_hook(void);
+
+/*
+ * Whether the progs.dat loaded for the current level is the stock id1 one
+ * (#37): 1 if it is byte-identical to the progs.dat found under id1 at
+ * dqsim_init (identity is the file length plus a hash of the whole file;
+ * the progs header CRC alone is not an identity), 0 if it differs, and
+ * DQSIM_ERROR if no map is loaded. This is what the policy hook gates on.
+ */
+DQSIM_API int dqsim_progs_is_stock(void);
 
 /* Name of the map currently loaded ("e1m1"), or "" if none. */
 DQSIM_API const char *dqsim_map_name(void);

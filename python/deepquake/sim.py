@@ -53,6 +53,7 @@ class _Config(ctypes.Structure):
         ("heap_mb", ctypes.c_int),
         ("tick_seconds", ctypes.c_double),
         ("verbose", ctypes.c_int),
+        ("game", ctypes.c_char_p),
     ]
 
 
@@ -283,16 +284,33 @@ def init(
     heap_mb: int = 0,
     tick_seconds: float = 0.0,
     verbose: bool = False,
+    game: str | None = None,
 ) -> None:
     """Start the engine. Allowed once per process.
 
     ``basedir`` is the directory containing ``id1/``; it defaults to the
     project's game data directory. Zero for ``heap_mb`` or ``tick_seconds``
-    selects the library default.
+    selects the library default. ``game`` is an optional single game
+    directory name under ``basedir`` (loaded as ``-game``, so its
+    ``progs.dat`` shadows id1's); names with separators or ``..`` raise
+    :class:`SimError`.
     """
     base = Path(basedir) if basedir is not None else gamedata.gamedata_dir()
-    config = _Config(os.fsencode(base), heap_mb, tick_seconds, int(verbose))
+    config = _Config(
+        os.fsencode(base),
+        heap_mb,
+        tick_seconds,
+        int(verbose),
+        os.fsencode(game) if game else None,
+    )
     _check(_load().dqsim_init(ctypes.byref(config)))
+
+
+def progs_is_stock() -> bool:
+    """Whether the loaded level's progs.dat is the stock id1 one (#37)."""
+    result = _load().dqsim_progs_is_stock()
+    _check(min(result, 0))
+    return bool(result)
 
 
 def load_map(name: str, *, skill: int = 1, seed: int = 0) -> None:

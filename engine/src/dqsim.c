@@ -26,7 +26,12 @@ static int state = STATE_NEW;
 static double tick_seconds;
 static quakeparms_t parms;
 static char basedir[1024];
-static char *engine_argv[5];
+static char game_dir[256];
+static char *engine_argv[7];
+/* Identity of the stock id1 progs.dat, read from disk at dqsim_init (#37):
+ * what the loaded progs of every level is compared against. */
+static uint64_t stock_progs_hash;
+static size_t stock_progs_length;
 static int level_count;
 /* Bumped whenever a new level episode starts, so old snapshots are refused. */
 static uint32_t level_serial;
@@ -72,6 +77,18 @@ static int fail_not_ready(void)
         return DQSIM_ERROR;
     }
 }
+
+static uint64_t fnv1a(uint64_t hash, const void *data, size_t length)
+{
+    const unsigned char *p = data;
+    for (size_t i = 0; i < length; i++) {
+        hash ^= p[i];
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
+}
+
+#define FNV1A_SEED 14695981039346656037ULL
 
 const char *dqsim_version(void)
 {
@@ -127,6 +144,116 @@ static void sign_on(void)
         Sys_Error("the player failed to spawn on '%s'", sv.name);
 }
 
+/* A game directory name is a single component under the basedir (#37).
+ * Upstream would raise a fatal error on bad names; reject them here so
+ * the caller gets a dqsim_ error and the one-shot init is not spent. */
+static int game_name_valid(const char *game)
+{
+    if (!game || !game[0])
+        return 1; /* unset: id1 only */
+    size_t length = strlen(game);
+    if (length >= sizeof(game_dir) || game[0] == '-')
+        return 0;
+    if (strcmp(game, ".") == 0 || strstr(game, "..") != NULL)
+        return 0;
+    for (const char *p = game; *p; p++)
+        if (*p == '/' || *p == '\\' || *p == ':' || (unsigned char)*p < 32 || *p == 127)
+            return 0;
+    return 1;
+}
+
+static int read_whole_file(const char *path, unsigned char **out, size_t *length)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0) {
+        fclose(f);
+        return 0;
+    }
+    *out = malloc((size_t)size);
+    if (!*out || fread(*out, 1, (size_t)size, f) != (size_t)size) {
+        free(*out);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    *length = (size_t)size;
+    return 1;
+}
+
+/* Extract "progs.dat" from a PAK file into out (malloc'd). */
+static int read_pak_progs(const char *path, unsigned char **out, size_t *length)
+{
+    unsigned char *pak_bytes;
+    size_t pak_length;
+    if (!read_whole_file(path, &pak_bytes, &pak_length) || pak_length < 12)
+        return 0;
+    int32_t dir_offset, dir_length;
+    memcpy(&dir_offset, pak_bytes + 4, 4);
+    memcpy(&dir_length, pak_bytes + 8, 4);
+    int found = 0;
+    if (memcmp(pak_bytes, "PACK", 4) == 0 && dir_offset >= 0 && dir_length >= 0 &&
+        (size_t)(dir_offset + dir_length) <= pak_length) {
+        for (int32_t at = dir_offset; at + 64 <= dir_offset + dir_length && !found; at += 64) {
+            char name[57];
+            memcpy(name, pak_bytes + at, 56);
+            name[56] = '\0';
+            if (strcmp(name, "progs.dat") != 0)
+                continue;
+            int32_t offset, size;
+            memcpy(&offset, pak_bytes + at + 56, 4);
+            memcpy(&size, pak_bytes + at + 60, 4);
+            if (offset >= 0 && size > 0 && (size_t)(offset + size) <= pak_length) {
+                *out = malloc((size_t)size);
+                if (*out) {
+                    memcpy(*out, pak_bytes + offset, (size_t)size);
+                    *length = (size_t)size;
+                    found = 1;
+                }
+            }
+        }
+    }
+    free(pak_bytes);
+    return found;
+}
+
+/* The stock identity: progs.dat as the engine finds it under id1 — the
+ * pak files in descending order (the engine searches later paks first),
+ * then a loose id1/progs.dat. */
+static int compute_stock_identity(const char *base)
+{
+    char path[sizeof(basedir) + 64];
+    unsigned char *bytes = NULL;
+    size_t length = 0;
+    int highest = -1;
+    for (int n = 0; n < 16; n++) {
+        q_snprintf(path, sizeof(path), "%s/id1/pak%d.pak", base, n);
+        FILE *f = fopen(path, "rb");
+        if (!f)
+            break;
+        fclose(f);
+        highest = n;
+    }
+    for (int n = highest; n >= 0 && !bytes; n--) {
+        q_snprintf(path, sizeof(path), "%s/id1/pak%d.pak", base, n);
+        read_pak_progs(path, &bytes, &length);
+    }
+    if (!bytes) {
+        q_snprintf(path, sizeof(path), "%s/id1/progs.dat", base);
+        read_whole_file(path, &bytes, &length);
+    }
+    if (!bytes)
+        return 0;
+    stock_progs_hash = fnv1a(FNV1A_SEED, bytes, length);
+    stock_progs_length = length;
+    free(bytes);
+    return 1;
+}
+
 int dqsim_init(const dqsim_config *config)
 {
     char pak[sizeof(basedir) + 32];
@@ -139,6 +266,8 @@ int dqsim_init(const dqsim_config *config)
     if (config->heap_mb < 0 || config->heap_mb > 2047 || config->tick_seconds < 0 ||
         config->tick_seconds > 0.1)
         return fail("dqsim_init: heap_mb must be 0-2047 and tick_seconds 0-0.1");
+    if (!game_name_valid(config->game))
+        return fail("dqsim_init: game must be a single directory name under basedir");
 
     /* The engine itself starts without game data and fails later, obscurely. */
     q_snprintf(pak, sizeof(pak), "%s/id1/pak0.pak", config->basedir);
@@ -148,21 +277,32 @@ int dqsim_init(const dqsim_config *config)
         return DQSIM_ERROR;
     }
     fclose(f);
+    if (!compute_stock_identity(config->basedir))
+        return fail("dqsim_init: cannot find progs.dat under id1");
 
     dq_verbose = config->verbose;
     tick_seconds = config->tick_seconds > 0 ? config->tick_seconds : DQSIM_DEFAULT_TICK_SECONDS;
     q_strlcpy(basedir, config->basedir, sizeof(basedir));
+    game_dir[0] = '\0';
+    if (config->game && config->game[0])
+        q_strlcpy(game_dir, config->game, sizeof(game_dir));
 
     engine_argv[0] = "dqsim";
     engine_argv[1] = "-dedicated"; /* no client subsystems */
     engine_argv[2] = "1";          /* one client slot: single-player rules */
     engine_argv[3] = "-basedir";
     engine_argv[4] = basedir;
+    int engine_argc = 5;
+    if (game_dir[0]) {
+        engine_argv[5] = "-game";
+        engine_argv[6] = game_dir;
+        engine_argc = 7;
+    }
 
     memset(&parms, 0, sizeof(parms));
     parms.basedir = basedir;
     parms.userdir = basedir;
-    parms.argc = 5;
+    parms.argc = engine_argc;
     parms.argv = engine_argv;
     parms.memsize = (config->heap_mb ? config->heap_mb : 128) * 1024 * 1024;
     parms.membase = malloc(parms.memsize);
@@ -408,35 +548,33 @@ static char hook_prefix[32]; /* QuakeC state prefix, e.g. "army_" */
 static float hook_stand_frame, hook_run_frame;
 static int hook_run_frames;
 static unsigned hook_anim_tick;
-static uint64_t stock_progs_hash;
-static int stock_progs_known;
 static int progs_is_stock;
-
-static uint64_t hash_progs(void)
-{
-    const unsigned char *bytes = (const unsigned char *)progs;
-    uint64_t hash = 1469598103934665603ULL; /* FNV-1a */
-    for (int i = 0; i < com_filesize; i++) {
-        hash ^= bytes[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
 
 static void hook_on_level_start(void)
 {
     hook_callback = NULL;
     hook_user = NULL;
     hook_index = 0;
-    /* The first progs loaded in a process is id1's: the simulator has no
-     * game-directory support yet, so it is the stock reference. When one
-     * is added (#37) it must supply the reference from id1 instead. */
-    uint64_t hash = hash_progs();
-    if (!stock_progs_known) {
-        stock_progs_hash = hash;
-        stock_progs_known = 1;
+    /* Identity of the progs this level actually loaded: the raw file
+     * bytes through the engine's search path (a game directory shadows
+     * id1), hashed with its length. Reading the in-memory progs instead
+     * would hash a byte-swapped copy under a stale com_filesize. */
+    byte *raw = COM_LoadMallocFile("progs.dat", NULL);
+    progs_is_stock = 0;
+    if (raw) {
+        size_t length = (size_t)com_filesize;
+        progs_is_stock = length == stock_progs_length &&
+                         fnv1a(FNV1A_SEED, raw, length) == stock_progs_hash;
+        free(raw);
     }
-    progs_is_stock = hash == stock_progs_hash;
+}
+
+int dqsim_progs_is_stock(void)
+{
+    DQ_ENTER();
+    if (!sv.active)
+        return fail("dqsim_progs_is_stock: no map is loaded");
+    return progs_is_stock ? 1 : 0;
 }
 
 static func_t find_function(const char *name)
@@ -751,16 +889,6 @@ double dqsim_time(void)
     if (state != STATE_READY || !sv.active)
         return -1.0;
     return sv.time;
-}
-
-static uint64_t fnv1a(uint64_t hash, const void *data, size_t length)
-{
-    const unsigned char *p = data;
-    for (size_t i = 0; i < length; i++) {
-        hash ^= p[i];
-        hash *= 0x100000001b3ULL;
-    }
-    return hash;
 }
 
 uint64_t dqsim_state_hash(void)
