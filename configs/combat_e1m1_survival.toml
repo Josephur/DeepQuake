@@ -1,0 +1,25 @@
+# Combat reward comparison (#32): one stock Grunt on e1m1, reward = "survival".
+# Identical to the other two combat_e1m1_* configs except reward and name.
+#   uv run python -m deepquake.train_combat configs/combat_e1m1_survival.toml
+name = "combat_e1m1_survival"
+map = "e1m1"
+monster = "monster_army"
+reward = "survival"
+seed = 0
+envs = 8
+total_steps = 500000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
