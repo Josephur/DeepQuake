@@ -53,7 +53,10 @@ class ActorCritic(nn.Module):
         self.obs_dim = obs_dim
         self.action_nvec = tuple(action_nvec)
         self.hidden = hidden
-        self.gru = nn.GRUCell(obs_dim, hidden)
+        # A one-layer nn.GRU is the same cell as GRUCell, and unlike the cell
+        # it accepts packed variable-length batches, which the update replays
+        # in a single call (#20).
+        self.gru = nn.GRU(obs_dim, hidden, batch_first=True)
         self.policy_head = nn.Linear(hidden, sum(self.action_nvec))
         self.value_head = nn.Linear(hidden, 1)
         nn.init.orthogonal_(self.policy_head.weight, 0.01)
@@ -65,7 +68,7 @@ class ActorCritic(nn.Module):
 
     def advance(self, obs: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
         """One GRU step: the observation and previous state give the new state."""
-        return self.gru(obs, hidden)
+        return self.gru(obs.unsqueeze(1), hidden.unsqueeze(0))[1].squeeze(0)
 
     def distributions(self, hidden: torch.Tensor) -> list[torch.distributions.Categorical]:
         logits = self.policy_head(hidden)
@@ -77,14 +80,28 @@ class ActorCritic(nn.Module):
     def value(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.value_head(hidden).squeeze(-1)
 
-    def act(self, obs: torch.Tensor, hidden: torch.Tensor, *, greedy: bool = False):
-        """One step. Returns ``actions (n, heads), log_prob (n,), value (n,), new_hidden``."""
+    def act(
+        self,
+        obs: torch.Tensor,
+        hidden: torch.Tensor,
+        *,
+        greedy: bool = False,
+        generator: torch.Generator | None = None,
+    ):
+        """One step. Returns ``actions (n, heads), log_prob (n,), value (n,), new_hidden``.
+
+        Sampling uses ``generator`` when given, so worker processes and
+        evaluation share one reproducible stream instead of the global one.
+        """
         hidden = self.advance(obs, hidden)
         dists = self.distributions(hidden)
         if greedy:
             actions = torch.stack([d.probs.argmax(-1) for d in dists], dim=-1)
         else:
-            actions = torch.stack([d.sample() for d in dists], dim=-1)
+            actions = torch.stack(
+                [torch.multinomial(d.probs, 1, generator=generator).squeeze(-1) for d in dists],
+                dim=-1,
+            )
         log_prob = torch.stack([d.log_prob(actions[:, i]) for i, d in enumerate(dists)]).sum(0)
         return actions, log_prob, self.value(hidden), hidden
 
@@ -129,14 +146,158 @@ def load_model(path, device="cpu") -> tuple[ActorCritic, dict]:
         )
     spec.pop("arch")
     model = ActorCritic(**spec).to(device)
-    model.load_state_dict(checkpoint["model"])
+    state = checkpoint["model"]
+    if "gru.weight_ih_l0" not in state:  # GRUCell-era checkpoint: same cell, other names
+        state = {
+            key.replace("gru.weight_ih", "gru.weight_ih_l0")
+            .replace("gru.weight_hh", "gru.weight_hh_l0")
+            .replace("gru.bias_ih", "gru.bias_ih_l0")
+            .replace("gru.bias_hh", "gru.bias_hh_l0"): value
+            for key, value in state.items()
+        }
+    model.load_state_dict(state)
     return model, checkpoint
+
+
+def chunk_segments(done: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split chunks at episode ends into run-length segments.
+
+    ``done`` is ``(sequences, steps)`` with 1 where an episode ended. A done
+    cuts *after* its step: the next step starts from a zero state. Returns
+    ``(owner, start, length)`` — for each segment, the chunk it belongs to,
+    the step it starts at, and how many steps it spans.
+    """
+    sequences, steps = done.shape
+    ends = done.cpu().numpy()
+    owner, start, length = [], [], []
+    for b in range(sequences):
+        s = 0
+        for t in np.flatnonzero(ends[b]):
+            owner.append(b)
+            start.append(s)
+            length.append(int(t) + 1 - s)
+            s = int(t) + 1
+        if s < steps:
+            owner.append(b)
+            start.append(s)
+            length.append(steps - s)
+    make = lambda values: torch.tensor(values, dtype=torch.long)  # noqa: E731
+    return make(owner), make(start), make(length)
+
+
+def packed_replay(
+    model: ActorCritic,
+    obs_seq: torch.Tensor,
+    act_seq: torch.Tensor,
+    hid_seq: torch.Tensor,
+    owner: torch.Tensor,
+    start: torch.Tensor,
+    seg_len: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Replay segments through the GRU in one packed pass.
+
+    Returns ``(owner, time, log_prob, entropy, value)`` flattened over all
+    real (non-padded) segment positions, plus the gather indices, so callers
+    can align any per-step buffer with ``buffer[owner, time]``. A segment
+    starting at step 0 begins from the chunk's recorded hidden state
+    (``hid_seq``); every later segment starts from zeros, exactly as the
+    rollout zeroed the state at an episode end.
+    """
+    device = obs_seq.device
+    seg_len_cpu = seg_len.cpu()
+    maxlen = int(seg_len_cpu.max())
+    steps = obs_seq.shape[1]
+    time = start.to(device).unsqueeze(1) + torch.arange(maxlen, device=device)
+    # Padded positions may index past the chunk end; they are masked out
+    # below, so pin them to the last step to keep the gather in range.
+    time = torch.minimum(time, torch.full_like(time, steps - 1))
+    valid = torch.arange(maxlen, device=device) < seg_len_cpu.to(device).unsqueeze(1)
+    obs = obs_seq[owner.to(device).unsqueeze(1), time]  # (segments, maxlen, obs)
+    actions = act_seq[owner.to(device).unsqueeze(1), time]
+    hidden0 = torch.zeros(len(seg_len), model.hidden, device=device)
+    first = start.to(device) == 0
+    hidden0[first] = hid_seq[owner.to(device)[first]]
+    packed = nn.utils.rnn.pack_padded_sequence(obs, seg_len_cpu, batch_first=True,
+                                           enforce_sorted=False)  # fmt: skip
+    out, _ = model.gru(packed, hidden0.unsqueeze(0))
+    out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
+    valid = valid[:, : out.shape[1]]
+    log_prob, entropy, value = model.evaluate(out[valid], actions[valid])
+    flat_owner = owner.to(device).unsqueeze(1).expand_as(valid)[valid]
+    flat_time = time[:, : out.shape[1]][valid]
+    return flat_owner, flat_time, log_prob, entropy, value
+
+
+class RolloutActor:
+    """A policy that acts inside an environment worker (#20).
+
+    Holds a CPU copy of the network, a seeded sampling generator, and the
+    environment's recurrent state — which persists across :meth:`sync` calls
+    and is zeroed only when an episode ends, exactly as it was when the
+    learner stepped the environments itself. ``rollout`` runs ``steps``
+    decisions locally and returns the whole buffer, so training costs one
+    message per update instead of two per decision.
+    """
+
+    def __init__(self, spec: dict, state: dict, seed: int):
+        spec = dict(spec)
+        spec.pop("arch", None)
+        # One thread per worker: the model is tiny, and twenty workers each
+        # spawning a full thread pool fight over the cores instead (#20).
+        torch.set_num_threads(1)
+        self.model = ActorCritic(**spec)
+        self.model.eval()
+        self.sync(state, seed)
+        self.hidden = self.model.initial_hidden(1)
+
+    def sync(self, state: dict, seed: int) -> None:
+        """Take over new weights, and reseed the sampling stream."""
+        self.model.load_state_dict(state)
+        self.generator = torch.Generator().manual_seed(seed)
+
+    def rollout(self, env, obs, steps: int) -> dict:
+        """Run ``steps`` decisions from the worker's current ``obs``.
+
+        The caller keeps ``next_obs`` from the result as its current
+        observation; the episode (and the memory) continues across calls.
+        """
+        rows: dict[str, list] = {
+            key: [] for key in ("obs", "act", "logp", "val", "rew", "done", "hid")
+        }
+        episodes = successes = 0
+        for _ in range(steps):
+            obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                actions, log_prob, value, hidden = self.model.act(
+                    obs_t, self.hidden, generator=self.generator
+                )
+            rows["hid"].append(self.hidden[0].numpy())
+            result = env.step(actions[0].numpy())
+            done = bool(result.done)
+            obs = env.reset() if done else result.obs
+            rows["obs"].append(np.asarray(obs, dtype=np.float32))
+            rows["act"].append(actions[0].numpy())
+            rows["logp"].append(log_prob[0].item())
+            rows["val"].append(value[0].item())
+            rows["rew"].append(float(result.reward))
+            rows["done"].append(done)
+            episodes += done
+            successes += bool(result.success)
+            # An episode boundary resets memory: the next episode starts blind.
+            self.hidden = hidden * (1.0 - float(done))
+        return {
+            **{key: np.stack(values) for key, values in rows.items()},
+            "episodes": episodes,
+            "successes": successes,
+            "next_obs": np.asarray(obs, dtype=np.float32),
+            "next_hidden": self.hidden[0].numpy(),
+        }
 
 
 class PPO:
     """Collects rollouts from a vectorised environment and updates the network."""
 
-    def __init__(self, env, model: ActorCritic, config: PPOConfig, device):
+    def __init__(self, env, model: ActorCritic, config: PPOConfig, device, seed: int = 0):
         if config.steps_per_env % config.bptt:
             raise ValueError(
                 f"steps_per_env ({config.steps_per_env}) must be a multiple of bptt ({config.bptt})"
@@ -145,9 +306,8 @@ class PPO:
         self.model = model
         self.config = config
         self.device = device
+        self.rollout_seed = seed  # sync() reseeds workers from it each update
         self.optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5)
-        self.obs = torch.as_tensor(env.first_obs, dtype=torch.float32, device=device)
-        self.hidden = model.initial_hidden(env.n, device=device)
         self.total_steps = 0
 
     def update(self) -> dict:
@@ -155,31 +315,25 @@ class PPO:
         cfg, n, length = self.config, self.env.n, self.config.bptt
         steps = cfg.steps_per_env
         device = self.device
-        obs_buf = torch.zeros((steps, n, self.model.obs_dim), device=device)
-        hid_buf = torch.zeros((steps, n, self.model.hidden), device=device)
-        act_buf = torch.zeros(
-            (steps, n, len(self.model.action_nvec)), dtype=torch.long, device=device
-        )
-        logp_buf = torch.zeros((steps, n), device=device)
-        val_buf = torch.zeros((steps, n), device=device)
-        rew_buf = torch.zeros((steps, n), device=device)
-        done_buf = torch.zeros((steps, n), device=device)
-        episodes = successes = 0
 
-        for t in range(steps):
-            with torch.no_grad():
-                actions, log_prob, value, hidden = self.model.act(self.obs, self.hidden)
-            hid_buf[t] = self.hidden  # the state this decision was made from
-            next_obs, reward, done, success = self.env.step(actions.cpu().numpy())
-            obs_buf[t], act_buf[t], logp_buf[t], val_buf[t] = self.obs, actions, log_prob, value
-            rew_buf[t] = torch.as_tensor(reward, device=device)
-            done_buf[t] = torch.as_tensor(done, dtype=torch.float32, device=device)
-            episodes += int(done.sum())
-            successes += int(success.sum())
-            # An episode boundary resets memory: the next episode starts blind.
-            self.hidden = hidden * (1.0 - done_buf[t].unsqueeze(-1))
-            self.obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+        # The rollout runs inside the workers, on their own CPU copy of the
+        # policy (#20): pushing the weights and reading the whole buffer back
+        # costs one round trip per update, not two per decision.
+        state = {key: value.detach().cpu() for key, value in self.model.state_dict().items()}
+        self.env.sync(self.model.spec(), state, self.rollout_seed)
+        self.rollout_seed += n
+        data = self.env.rollout(steps)
         self.total_steps += steps * n
+
+        to = lambda key, dtype=torch.float32: torch.as_tensor(data[key], dtype=dtype, device=device)  # noqa: E731
+        obs_buf = to("obs")
+        hid_buf = to("hid")
+        act_buf = to("act", torch.long)
+        logp_buf = to("logp")
+        val_buf = to("val")
+        rew_buf = to("rew")
+        done_buf = to("done")
+        episodes, successes = int(data["episodes"]), int(data["successes"])
 
         # Generalised advantage estimation. An episode end cuts the bootstrap.
         with torch.no_grad():
@@ -187,7 +341,9 @@ class PPO:
             last = torch.zeros(n, device=device)
             # The value of the last observation: advance the memory over it
             # (a finished episode's state is zero, so this is its fresh start).
-            next_value = self.model.value(self.model.advance(self.obs, self.hidden))
+            next_obs = to("next_obs")
+            next_hidden = to("next_hidden")
+            next_value = self.model.value(self.model.advance(next_obs, next_hidden))
             for t in reversed(range(steps)):
                 not_done = 1.0 - done_buf[t]
                 delta = rew_buf[t] + cfg.gamma * next_value * not_done - val_buf[t]
@@ -219,37 +375,37 @@ class PPO:
             hid_buf.reshape(chunks, length, n, -1)[:, 0].permute(1, 0, 2).reshape(n * chunks, -1)
         )
 
-        def replay(index):
-            """Log-prob, entropy, values for whole sequences, stepped through the GRU."""
-            hidden = hid_seq[index]
-            logs, entropies, values = [], [], []
-            for t in range(length):
-                hidden = self.model.advance(obs_seq[index, t], hidden)
-                log_prob, entropy, value = self.model.evaluate(hidden, act_seq[index, t])
-                logs.append(log_prob)
-                entropies.append(entropy)
-                values.append(value)
-                # A sequence can contain an episode boundary; the next step
-                # then starts from a zero state, exactly as in the rollout.
-                hidden = hidden * (1.0 - done_seq[index, t].unsqueeze(-1))
-            return (
-                torch.stack(logs).transpose(0, 1),
-                torch.stack(entropies).transpose(0, 1),
-                torch.stack(values).transpose(0, 1),
-            )
-
+        # Episode ends inside a chunk cut it into segments, each replayed from
+        # a known state: the chunk's recorded hidden state, or zeros after a
+        # cut. Packed into one nn.GRU call per minibatch, the replay is one
+        # pass over the batch instead of a Python loop per timestep (#20).
+        seg_owner, seg_start, seg_len = chunk_segments(done_seq)
         batch = n * chunks
         stats = {}
         for _ in range(cfg.epochs):
             for index in torch.randperm(batch, device=device).chunk(cfg.minibatches):
-                log_prob, entropy, value = replay(index)
-                adv = adv_seq[index]
+                pick = torch.isin(seg_owner, index.cpu())
+                owner_f, time_f, log_prob, entropy, value = packed_replay(
+                    self.model,
+                    obs_seq,
+                    act_seq,
+                    hid_seq,
+                    seg_owner[pick],
+                    seg_start[pick],
+                    seg_len[pick],
+                )
+
+                def flat(x, owner_f=owner_f, time_f=time_f):
+                    """Any per-step buffer (sequences, steps) at the replayed positions."""
+                    return x[owner_f, time_f]
+
+                adv = flat(adv_seq)
                 adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-                ratio = (log_prob - logp_seq[index]).exp()
+                ratio = (log_prob - flat(logp_seq)).exp()
                 policy_loss = -torch.min(
                     ratio * adv, ratio.clamp(1 - cfg.clip, 1 + cfg.clip) * adv
                 ).mean()
-                value_loss = 0.5 * (value - ret_seq[index]).pow(2).mean()
+                value_loss = 0.5 * (value - flat(ret_seq)).pow(2).mean()
                 loss = policy_loss + cfg.value_coef * value_loss - cfg.entropy_coef * entropy.mean()
                 self.optimizer.zero_grad()
                 loss.backward()

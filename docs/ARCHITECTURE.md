@@ -234,7 +234,12 @@ reverse is not.
 
 - Many `libdqsim` workers on CPU cores produce experience; a single learner
   on the RTX 3090 consumes it. Simulation throughput, not GPU memory, is the
-  expected bottleneck.
+  expected bottleneck. Workers act for themselves: each holds a CPU copy of
+  the policy (one torch thread each) and runs a whole rollout locally, so an
+  update costs one weights push and one buffer read, not a round trip per
+  decision (#20). The recurrent state lives in the worker, zeroed at episode
+  ends, and persists across weight pushes exactly as it did when the learner
+  stepped the environments itself.
 - Order of work: a **player agent** learns movement and navigation, then
   combat. Monster policies are then trained against a pool of player agents
   (and scripted opponents) so they do not overfit to one opponent.
@@ -243,10 +248,10 @@ reverse is not.
   regardless of where they were trained. For the client they will be
   exported to ONNX and run through ONNX Runtime with the CUDA provider when
   a GPU is present, falling back to CPU.
-- Measured on the first run: about 6,800 decisions per second with 20
-  simulator processes. The limit is stepping the environments and passing
-  data between processes, not the GPU, so a larger accelerator would not
-  make this faster; fewer, cheaper round trips would.
+- Measured (same task, 20 workers): 2,500 decisions/s when every decision
+  was a pipe round trip plus a GPU forward; 8,300/s with worker-side acting
+  and a packed BPTT replay (#20). The limit is now the workers' own stepping
+  and inference, not process traffic.
 
 ### 6. Distribution
 

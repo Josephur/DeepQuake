@@ -1,0 +1,30 @@
+# Throughput benchmark for the training loop, on the task of #14: same
+# single-map setup as nav_e1m1, stopped after a fixed number of updates.
+#   uv run python -m deepquake.train_nav configs/throughput_e1m1.toml --updates 30
+# Rename runs/throughput_e1m1 after each measurement (runs are never
+# overwritten); the steps/s line in the log is the number #20 tracks.
+name = "throughput_e1m1"
+map = "e1m1"
+seed = 0
+envs = 20                 # worker processes; leave a few cores for the learner
+total_steps = 2_000_000   # never reached: stop with --updates
+device = "3090"           # substring of the CUDA device name; "" for any GPU or CPU
+checkpoint_every = 20     # updates between checkpoints
+
+[curriculum]              # the goal may be up to this far from the start, on foot (map units)
+start = 300.0
+step = 100.0              # added when the success rate reaches the threshold
+max = 2000.0
+threshold = 0.7
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

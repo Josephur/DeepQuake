@@ -88,7 +88,7 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
     print(f"maps: {', '.join(maps)}  held out: {', '.join(held_out) or 'none'}", flush=True)
     with ProcVecEnv(partial(make_env, maps, config["seed"]), config["envs"]) as env:
         env.set_attr("max_goal_distance", goal_distance)
-        learner = ppo.PPO(env, model, ppo_config, device)
+        learner = ppo.PPO(env, model, ppo_config, device, seed=config["seed"] * 1000)
         learner.total_steps = start_steps
         if saved:
             learner.optimizer.load_state_dict(saved["optimizer"])
