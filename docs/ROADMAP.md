@@ -161,6 +161,24 @@ next suspect named by #39 is the action representation itself (turn
 quantisation, no pitch aim), which is a design question rather than
 more training budget.
 
+Third attempt (2026-11-11, #38 after the #40 aim spike:
+`configs/combat_pool3.toml`, finer turn steps {-30,-15,-5,0,+5,+15,+30}
+and a pitch aim head in the action layout, same opponents, sparse
+reward and original placement, 10,000,000 decisions). Same fixed
+tasks; baselines use the same new action heads:
+
+| Policy | Grunt, e1m1 (trained) | Ogre, e1m4 (trained) | Knight, e1m4 (held-out type) | Ogre, e1m5 (held-out map) |
+| --- | --- | --- | --- | --- |
+| Random actions | 13.5% | 0.0% | 2.5% | 5.0% |
+| Scripted shooter | 23.0% | 9.5% | 9.0% | 22.5% |
+| Trained | 10.5% | 0.0% | 1.5% | 5.0% |
+
+Aim fidelity in the scripted policy was worth wins (#40), but the
+trained policy with the finer heads scored *worse*, so representation
+alone does not explain the gap either. #38 stays open and blocked;
+three measured attempts now bound the problem to optimisation and
+task structure rather than any single input the policy is missing.
+
 ## M4 — First monster brain
 
 - [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
