@@ -29,7 +29,6 @@ add_library(quakespasm_server OBJECT
   ${QS_DIR}/strlcpy.c
   ${QS_DIR}/sv_main.c
   ${QS_DIR}/sv_move.c
-  ${QS_DIR}/sv_phys.c
   ${QS_DIR}/sv_user.c
   ${QS_DIR}/world.c
   ${QS_DIR}/zone.c
@@ -45,6 +44,21 @@ target_compile_definitions(quakespasm_server PRIVATE
 set_target_properties(quakespasm_server PROPERTIES C_EXTENSIONS ON)
 target_compile_options(quakespasm_server PRIVATE -w -fno-strict-aliasing)
 
+# sv_phys.c is the one vendored file compiled differently (#31): every
+# QuakeC program execution it initiates (thinks, touches, the player and
+# frame thinks) is routed to the brain hook in src/dqsim.c, which passes
+# all but the nominated monster's decision thinks straight through to the
+# real PR_ExecuteProgram. The vendored file itself is unmodified.
+add_library(quakespasm_phys OBJECT ${QS_DIR}/sv_phys.c)
+target_include_directories(quakespasm_phys PRIVATE ${DQSIM_ENGINE_INCLUDES})
+target_compile_definitions(quakespasm_phys PRIVATE
+  USE_SDL2
+  rand=dqsim_rand
+  PR_ExecuteProgram=dqsim_hook_execute_program
+)
+set_target_properties(quakespasm_phys PROPERTIES C_EXTENSIONS ON)
+target_compile_options(quakespasm_phys PRIVATE -w -fno-strict-aliasing)
+
 add_library(dqsim SHARED
   src/client_stubs.c
   src/dqsim.c
@@ -52,6 +66,7 @@ add_library(dqsim SHARED
   src/platform.c
   src/rng.c
   $<TARGET_OBJECTS:quakespasm_server>
+  $<TARGET_OBJECTS:quakespasm_phys>
 )
 set_target_properties(dqsim PROPERTIES C_EXTENSIONS ON)
 target_include_directories(dqsim PUBLIC include PRIVATE ${DQSIM_ENGINE_INCLUDES})
@@ -98,6 +113,10 @@ if(BUILD_TESTING)
   dqsim_add_test(test_snapshot)
   add_test(NAME dqsim.snapshot COMMAND test_snapshot ${DQSIM_TEST_GAMEDATA})
   set_tests_properties(dqsim.snapshot PROPERTIES SKIP_RETURN_CODE 77 LABELS gamedata)
+
+  dqsim_add_test(test_hook)
+  add_test(NAME dqsim.hook COMMAND test_hook ${DQSIM_TEST_GAMEDATA})
+  set_tests_properties(dqsim.hook PROPERTIES SKIP_RETURN_CODE 77 LABELS gamedata)
 
   # Fidelity against pristine upstream QuakeSpasm, built by
   # tools/fetch_fidelity_reference.sh (local only; skips when absent).

@@ -150,6 +150,29 @@ mean "a monster we know how to control". Decided:
   hook uses are present and unmodified") is possible, but only with
   evidence that real mods need it; it is not M4 work.
 
+**Implemented (#31):** `dqsim_set_policy_hook` / `dqsim_clear_policy_hook`
+(the Python form is `sim.set_policy_hook`) nominate one monster of the
+current level. `sv_phys.c` is compiled with `PR_ExecuteProgram` renamed
+to the hook's entry point — the vendored file itself is unmodified — so
+when the nominated monster's scheduled stand/walk/run think would run,
+the callback instead receives an observation built from live state (its
+own origin, velocity, facing, health and ground/water state; a 2×24 ray
+fan with surface kinds from its eye; the entities it has line of sight
+to, nearest first) and returns an action: absolute facing, forward/side
+speeds, and an attack flag. Movement is applied as ground steps or air
+velocity at that same point in the tick and the decision think is
+rescheduled one tick later, so the policy decides every tick; the
+animation frames come from the QuakeC state functions' own frames. An
+attack action with a visible player and QuakeC's `attack_finished`
+expired starts the monster's real QuakeC attack sequence, and attack,
+pain and death sequences always run under QuakeC. Until #37 adds game
+directories the simulator can only load id1, so the progs gate compares
+against the first progs loaded in the process. With no nomination the
+simulation is bit-identical (the fidelity test guards this); the
+nomination refuses non-monsters and, per the gate above, a non-stock
+progs. Turning observations into the fair-senses monster observation of
+section 3 is #33, and training a policy on this hook is #35.
+
 ### 3. Observations and actions
 
 Chosen to be cheap to compute in the simulator and identical in the client:

@@ -10,6 +10,10 @@ visibility and surface lumps are empty, which the loader accepts.
 The collision trees are built for points (hull 0) and for the two player
 hulls, whose brushes are the rooms expanded by the hull size — qbsp does
 this when it compiles a real map; the loader does not.
+
+``generate(monster=True)`` also places a ``monster_army`` in the middle
+room, for tests that need a monster on a map that is not id's (#31); the
+default map is byte-identical to the original.
 """
 
 from __future__ import annotations
@@ -112,7 +116,8 @@ class _Bsp:
     clipnode index or the contents as an unsigned 16-bit value.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, monster: bool = False) -> None:
+        self.monster = monster
         self.planes: list[tuple[int, float]] = []  # (axis, distance)
         self.leaves = [CONTENTS_SOLID]  # leaf 0: the generic solid leaf
         self.nodes: list[dict] = []
@@ -240,6 +245,11 @@ class _Bsp:
                 '"angle" "90"\n',
                 "}\n",
                 *[f'{{\n"classname" "light"\n"origin" "{x} 0 160"\n}}\n' for x in (-280, 272, 816)],
+                *(
+                    ['{\n"classname" "monster_army"\n"origin" "272 0 24"\n"angle" "180"\n}\n']
+                    if self.monster
+                    else []
+                ),
             ]
         ).encode("ascii")
         models = struct.pack(
@@ -269,9 +279,12 @@ class _Bsp:
         return bytes(header + body)
 
 
-def generate() -> bytes:
-    """The map file: three rooms, two doorways, one spawn point."""
-    bsp = _Bsp()
+def generate(monster: bool = False) -> bytes:
+    """The map file: three rooms, two doorways, one spawn point.
+
+    With ``monster=True``, a Grunt stands in the middle room (#31).
+    """
+    bsp = _Bsp(monster=monster)
     playable = ROOMS + DOORS
     hull0 = _tree(_REGION, playable)
     bsp.head_node = bsp.emit_nodes(hull0, _REGION)

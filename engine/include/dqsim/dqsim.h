@@ -163,6 +163,87 @@ DQSIM_API int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float 
  */
 DQSIM_API int dqsim_get_entities(dqsim_entity *out, int max);
 
+/*
+ * Brain hook: replace one monster's QuakeC decisions with a callback (#31).
+ *
+ * While a nomination is active, each time the nominated monster's QuakeC
+ * think would make a decision (its stand/walk/run state functions), the
+ * engine instead fills a dqsim_hook_observation from live state, calls the
+ * callback, and applies the returned dqsim_hook_action at that same point
+ * in the tick: facing, ground or air movement at the given speeds, and —
+ * when attack is set, a visible enemy exists, and QuakeC's attack cooldown
+ * has expired — the monster's real QuakeC attack sequence, whose animation
+ * and damage then run under QuakeC as usual (as do pain and death
+ * sequences). The decision think is rescheduled for the next tick, so the
+ * callback runs once per tick. Everything else in the level, including
+ * every other monster, runs the stock AI; with no nomination the
+ * simulation is unchanged.
+ *
+ * The gate from #27 applies: a nomination takes effect only while the
+ * loaded progs.dat is the stock id1 one. dqsim_set_policy_hook() refuses a
+ * nomination while a differing progs is loaded.
+ *
+ * The callback must not call any dqsim_ function. It runs inside the
+ * engine tick.
+ */
+#define DQSIM_HOOK_RAY_PITCHES 2
+#define DQSIM_HOOK_RAY_YAWS 24
+#define DQSIM_HOOK_RAYS (DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS)
+#define DQSIM_HOOK_RAY_DISTANCE 768.0f
+#define DQSIM_HOOK_SIGHT_RANGE 1000.0f
+#define DQSIM_HOOK_MAX_VISIBLE 16
+
+/* One entity the nominated monster can currently see (line of sight). */
+typedef struct dqsim_hook_visible {
+    int32_t index;        /* entity number, as in dqsim_entity */
+    int32_t flags;        /* QuakeC FL_* bits: 8 client, 32 monster, 256 item */
+    float relative[3];    /* its origin minus the monster's origin */
+    float velocity[3];
+    float health;
+    float distance;
+} dqsim_hook_visible;
+
+typedef struct dqsim_hook_observation {
+    double time;          /* simulated seconds since the map loaded */
+    int32_t entity_index; /* the nominated monster */
+    float origin[3];
+    float velocity[3];
+    float angles[3]; /* pitch, yaw, roll in degrees */
+    float health;
+    int32_t on_ground;
+    int32_t waterlevel; /* as in dqsim_player_state */
+    /* Ray fan from the monster's eye: DQSIM_HOOK_RAY_PITCHES rows (pitch
+     * 0 and 30 degrees) of DQSIM_HOOK_RAY_YAWS rays starting at its facing,
+     * fractions of DQSIM_HOOK_RAY_DISTANCE, kinds as in enum dqsim_surface. */
+    float rays[DQSIM_HOOK_RAYS];
+    unsigned char ray_kinds[DQSIM_HOOK_RAYS];
+    int32_t visible_count; /* entries used in visible[], nearest first */
+    dqsim_hook_visible visible[DQSIM_HOOK_MAX_VISIBLE];
+} dqsim_hook_observation;
+
+typedef struct dqsim_hook_action {
+    float desired_yaw; /* absolute facing in degrees, as for the player */
+    float forward;     /* units per second along the facing */
+    float side;        /* units per second, +right */
+    int32_t attack;    /* non-zero: start the QuakeC attack if able */
+} dqsim_hook_action;
+
+typedef void (*dqsim_hook_callback)(const dqsim_hook_observation *observation,
+                                    dqsim_hook_action *action, void *user);
+
+/*
+ * Nominate the monster with the given entity index (from
+ * dqsim_get_entities) as policy-driven, in the current level only; loading
+ * a map clears the nomination. The entity must be a monster (classname
+ * "monster_*") and the loaded progs.dat must be the stock one (#27), or
+ * the call fails and nothing is nominated. Replaces any previous
+ * nomination. The callback and user pointer are kept, not copied.
+ */
+DQSIM_API int dqsim_set_policy_hook(int entity_index, dqsim_hook_callback callback, void *user);
+
+/* Remove the nomination, if any. Stock AI makes every decision again. */
+DQSIM_API int dqsim_clear_policy_hook(void);
+
 /* Name of the map currently loaded ("e1m1"), or "" if none. */
 DQSIM_API const char *dqsim_map_name(void);
 

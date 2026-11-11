@@ -31,6 +31,10 @@ static int level_count;
 /* Bumped whenever a new level episode starts, so old snapshots are refused. */
 static uint32_t level_serial;
 
+/* Brain hook state and level-start housekeeping; see the hook code below
+ * dqsim_ray_fan. */
+static void hook_on_level_start(void);
+
 /*
  * Every API function that enters the engine starts with DQ_ENTER. If the
  * engine raises a fatal error it lands back here, the simulator is marked
@@ -210,6 +214,7 @@ int dqsim_load_map(const char *map, int skill, uint32_t seed)
     sign_on();
     level_count = 0;
     level_serial++;
+    hook_on_level_start();
     return DQSIM_OK;
 }
 
@@ -252,6 +257,7 @@ int dqsim_step(const dqsim_action *action)
         sign_on();
         level_count++;
         level_serial++;
+        hook_on_level_start();
     }
     return DQSIM_OK;
 }
@@ -382,6 +388,287 @@ int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distan
                 out_kind[p * n_yaw + y] = kind;
         }
     }
+    return DQSIM_OK;
+}
+
+/*
+ * Brain hook (#31). sv_phys.c is compiled with PR_ExecuteProgram renamed
+ * to dqsim_hook_execute_program (see engine/CMakeLists.txt), so every
+ * QuakeC execution the physics initiates arrives here first. Only one
+ * shape is intercepted: the nominated monster's scheduled think, when the
+ * think function is one of its stand/walk/run state functions — the
+ * points where QuakeC makes a movement or attack decision. Attack, pain
+ * and death state functions are not decisions of that kind and execute
+ * under QuakeC as usual, so their animation and damage stay stock.
+ */
+static dqsim_hook_callback hook_callback;
+static void *hook_user;
+static int hook_index; /* entity number, 0 = no nomination */
+static char hook_prefix[32]; /* QuakeC state prefix, e.g. "army_" */
+static float hook_stand_frame, hook_run_frame;
+static int hook_run_frames;
+static unsigned hook_anim_tick;
+static uint64_t stock_progs_hash;
+static int stock_progs_known;
+static int progs_is_stock;
+
+static uint64_t hash_progs(void)
+{
+    const unsigned char *bytes = (const unsigned char *)progs;
+    uint64_t hash = 1469598103934665603ULL; /* FNV-1a */
+    for (int i = 0; i < com_filesize; i++) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static void hook_on_level_start(void)
+{
+    hook_callback = NULL;
+    hook_user = NULL;
+    hook_index = 0;
+    /* The first progs loaded in a process is id1's: the simulator has no
+     * game-directory support yet, so it is the stock reference. When one
+     * is added (#37) it must supply the reference from id1 instead. */
+    uint64_t hash = hash_progs();
+    if (!stock_progs_known) {
+        stock_progs_hash = hash;
+        stock_progs_known = 1;
+    }
+    progs_is_stock = hash == stock_progs_hash;
+}
+
+static func_t find_function(const char *name)
+{
+    for (int i = 1; i < progs->numfunctions; i++)
+        if (strcmp(PR_GetString(pr_functions[i].s_name), name) == 0)
+            return i;
+    return 0;
+}
+
+/* Model frame a QuakeC state function selects, from its OP_STATE. */
+static float state_frame(func_t fnum)
+{
+    if (!fnum)
+        return -1;
+    dstatement_t *statement = &pr_statements[pr_functions[fnum].first_statement];
+    if (statement->op != OP_STATE)
+        return -1;
+    return pr_globals[statement->a];
+}
+
+static int is_decision_think(func_t fnum)
+{
+    const char *name = PR_GetString(pr_functions[fnum].s_name);
+    size_t prefix = strlen(hook_prefix);
+    if (strncmp(name, hook_prefix, prefix) != 0)
+        return 0;
+    const char *rest = name + prefix;
+    if (strncmp(rest, "stand", 5) != 0 && strncmp(rest, "walk", 4) != 0 &&
+        strncmp(rest, "run", 3) != 0)
+        return 0;
+    size_t length = strlen(name);
+    return length > 0 && name[length - 1] >= '0' && name[length - 1] <= '9';
+}
+
+static void hook_observe(edict_t *ent, dqsim_hook_observation *obs)
+{
+    static const float pitches[DQSIM_HOOK_RAY_PITCHES] = {0.0f, 30.0f};
+    memset(obs, 0, sizeof(*obs));
+    obs->time = sv.time;
+    obs->entity_index = hook_index;
+    VectorCopy(ent->v.origin, obs->origin);
+    VectorCopy(ent->v.velocity, obs->velocity);
+    VectorCopy(ent->v.angles, obs->angles);
+    obs->health = ent->v.health;
+    obs->on_ground = ((int)ent->v.flags & FL_ONGROUND) != 0;
+    obs->waterlevel = (int)ent->v.waterlevel;
+
+    vec3_t eye;
+    VectorAdd(ent->v.origin, ent->v.view_ofs, eye);
+    for (int p = 0; p < DQSIM_HOOK_RAY_PITCHES; p++) {
+        for (int y = 0; y < DQSIM_HOOK_RAY_YAWS; y++) {
+            vec3_t angles, forward, right, up, end;
+            angles[PITCH] = pitches[p];
+            angles[YAW] = ent->v.angles[YAW] + 360.0f * (float)y / DQSIM_HOOK_RAY_YAWS;
+            angles[ROLL] = 0;
+            AngleVectors(angles, forward, right, up);
+            VectorMA(eye, DQSIM_HOOK_RAY_DISTANCE, forward, end);
+            trace_t trace = SV_Move(eye, vec3_origin, vec3_origin, end, MOVE_NOMONSTERS, ent);
+            float fraction;
+            int slot = p * DQSIM_HOOK_RAY_YAWS + y;
+            obs->ray_kinds[slot] = classify_ray(eye, forward, DQSIM_HOOK_RAY_DISTANCE, &trace,
+                                                &fraction);
+            obs->rays[slot] = fraction;
+        }
+    }
+
+    for (int i = 1; i < sv.num_edicts; i++) {
+        edict_t *other = EDICT_NUM(i);
+        if (other == ent || other->free)
+            continue;
+        if (!((int)other->v.flags & (FL_CLIENT | FL_MONSTER | FL_ITEM)))
+            continue;
+        vec3_t target, delta;
+        VectorAdd(other->v.origin, other->v.view_ofs, target);
+        VectorSubtract(target, eye, delta);
+        float distance = sqrtf(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+        if (distance > DQSIM_HOOK_SIGHT_RANGE)
+            continue;
+        trace_t trace = SV_Move(eye, vec3_origin, vec3_origin, target, MOVE_NOMONSTERS, ent);
+        if (trace.fraction < 1.0f && trace.ent != other)
+            continue; /* no line of sight */
+        dqsim_hook_visible entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.index = i;
+        entry.flags = (int)other->v.flags;
+        VectorSubtract(other->v.origin, ent->v.origin, entry.relative);
+        VectorCopy(other->v.velocity, entry.velocity);
+        entry.health = other->v.health;
+        entry.distance = distance;
+        /* Keep the nearest DQSIM_HOOK_MAX_VISIBLE, nearest first. */
+        int at = obs->visible_count;
+        if (at == DQSIM_HOOK_MAX_VISIBLE) {
+            if (distance >= obs->visible[at - 1].distance)
+                continue;
+            at--;
+        } else {
+            obs->visible_count++;
+        }
+        while (at > 0 && obs->visible[at - 1].distance > distance) {
+            obs->visible[at] = obs->visible[at - 1];
+            at--;
+        }
+        obs->visible[at] = entry;
+    }
+}
+
+static void hook_apply(edict_t *ent, func_t fnum, const dqsim_hook_observation *obs,
+                       const dqsim_hook_action *action)
+{
+    ent->v.angles[YAW] = action->desired_yaw;
+    ent->v.v_angle[YAW] = action->desired_yaw;
+
+    vec3_t angles = {0, action->desired_yaw, 0}, forward, right, up, wish;
+    AngleVectors(angles, forward, right, up);
+    wish[0] = forward[0] * action->forward + right[0] * action->side;
+    wish[1] = forward[1] * action->forward + right[1] * action->side;
+    wish[2] = 0;
+    float speed = sqrtf(wish[0] * wish[0] + wish[1] * wish[1]);
+    if (speed > 0.01f) {
+        if ((int)ent->v.flags & FL_ONGROUND) {
+            vec3_t move;
+            VectorScale(wish, (float)host_frametime, move);
+            SV_movestep(ent, move, true);
+        } else {
+            ent->v.velocity[0] = wish[0];
+            ent->v.velocity[1] = wish[1];
+        }
+    }
+
+    int attacked = 0;
+    if (action->attack) {
+        edict_t *enemy = NULL;
+        for (int i = 0; i < obs->visible_count; i++) {
+            if (obs->visible[i].flags & FL_CLIENT) {
+                enemy = EDICT_NUM(obs->visible[i].index);
+                break;
+            }
+        }
+        eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
+        char attack_name[40];
+        q_snprintf(attack_name, sizeof(attack_name), "%satk1", hook_prefix);
+        func_t attack = enemy ? find_function(attack_name) : 0;
+        if (attack && (!cooldown || sv.time >= cooldown->_float)) {
+            ent->v.enemy = EDICT_TO_PROG(enemy);
+            pr_global_struct->self = EDICT_TO_PROG(ent);
+            pr_global_struct->other = EDICT_TO_PROG(enemy);
+            pr_global_struct->time = sv.time;
+            PR_ExecuteProgram(attack);
+            attacked = 1;
+        }
+    }
+
+    if (!attacked) {
+        /* Animate from the state functions' own frames: run while moving,
+         * stand while still, advancing at the QuakeC think cadence. */
+        hook_anim_tick++;
+        if (speed > 0.01f && hook_run_frame >= 0)
+            ent->v.frame = hook_run_frame + (float)((hook_anim_tick / 7) % hook_run_frames);
+        else if (hook_stand_frame >= 0)
+            ent->v.frame = hook_stand_frame + (float)((hook_anim_tick / 7) % 8);
+        ent->v.think = fnum;
+        ent->v.nextthink = (float)(sv.time + host_frametime);
+    }
+}
+
+void dqsim_hook_execute_program(func_t fnum)
+{
+    if (hook_callback && hook_index > 0 && fnum > 0 && progs_is_stock) {
+        edict_t *ent = EDICT_NUM(hook_index);
+        if (!ent->free && ent->v.health > 0 && pr_global_struct->self == EDICT_TO_PROG(ent) &&
+            (func_t)ent->v.think == fnum && ent->v.nextthink == 0 && is_decision_think(fnum)) {
+            dqsim_hook_observation obs;
+            hook_observe(ent, &obs);
+            dqsim_hook_action action;
+            memset(&action, 0, sizeof(action));
+            action.desired_yaw = ent->v.angles[YAW];
+            hook_callback(&obs, &action, hook_user);
+            if (!ent->free)
+                hook_apply(ent, fnum, &obs, &action);
+            return;
+        }
+    }
+    PR_ExecuteProgram(fnum);
+}
+
+int dqsim_set_policy_hook(int entity_index, dqsim_hook_callback callback, void *user)
+{
+    if (!callback)
+        return fail("dqsim_set_policy_hook: callback is NULL (use dqsim_clear_policy_hook)");
+    if (entity_index <= 0)
+        return fail("dqsim_set_policy_hook: entity_index must be positive");
+    DQ_ENTER();
+    if (!sv.active)
+        return fail("dqsim_set_policy_hook: no map is loaded");
+    if (!progs_is_stock)
+        return fail("dqsim_set_policy_hook: the loaded progs.dat is not the stock one");
+    if (entity_index >= sv.num_edicts)
+        return fail("dqsim_set_policy_hook: no such entity");
+    edict_t *ent = EDICT_NUM(entity_index);
+    const char *classname = ent->free ? "" : PR_GetString(ent->v.classname);
+    if (ent->free || strncmp(classname, "monster_", 8) != 0)
+        return fail("dqsim_set_policy_hook: the entity is not a monster");
+
+    hook_callback = callback;
+    hook_user = user;
+    hook_index = entity_index;
+    hook_anim_tick = 0;
+    q_snprintf(hook_prefix, sizeof(hook_prefix), "%s_", classname + 8);
+    char name[40];
+    q_snprintf(name, sizeof(name), "%sstand1", hook_prefix);
+    hook_stand_frame = state_frame(find_function(name));
+    q_snprintf(name, sizeof(name), "%srun1", hook_prefix);
+    hook_run_frame = state_frame(find_function(name));
+    hook_run_frames = 0;
+    for (int i = 1; i <= 24; i++) {
+        q_snprintf(name, sizeof(name), "%srun%d", hook_prefix, i);
+        if (!find_function(name))
+            break;
+        hook_run_frames = i;
+    }
+    if (hook_run_frames == 0)
+        hook_run_frames = 1;
+    return DQSIM_OK;
+}
+
+int dqsim_clear_policy_hook(void)
+{
+    DQ_ENTER();
+    hook_callback = NULL;
+    hook_user = NULL;
+    hook_index = 0;
     return DQSIM_OK;
 }
 

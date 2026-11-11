@@ -97,6 +97,86 @@ FL_CLIENT = 8
 FL_MONSTER = 32
 FL_ITEM = 256
 
+#: Brain-hook fan geometry, mirroring dqsim.h (#31).
+HOOK_RAY_PITCHES = (0.0, 30.0)
+HOOK_RAY_YAWS = 24
+HOOK_MAX_VISIBLE = 16
+
+
+class _HookVisible(ctypes.Structure):
+    _fields_ = [
+        ("index", ctypes.c_int32),
+        ("flags", ctypes.c_int32),
+        ("relative", ctypes.c_float * 3),
+        ("velocity", ctypes.c_float * 3),
+        ("health", ctypes.c_float),
+        ("distance", ctypes.c_float),
+    ]
+
+
+class _HookObservation(ctypes.Structure):
+    _fields_ = [
+        ("time", ctypes.c_double),
+        ("entity_index", ctypes.c_int32),
+        ("origin", ctypes.c_float * 3),
+        ("velocity", ctypes.c_float * 3),
+        ("angles", ctypes.c_float * 3),
+        ("health", ctypes.c_float),
+        ("on_ground", ctypes.c_int32),
+        ("waterlevel", ctypes.c_int32),
+        ("rays", ctypes.c_float * (len(HOOK_RAY_PITCHES) * HOOK_RAY_YAWS)),
+        ("ray_kinds", ctypes.c_ubyte * (len(HOOK_RAY_PITCHES) * HOOK_RAY_YAWS)),
+        ("visible_count", ctypes.c_int32),
+        ("visible", _HookVisible * HOOK_MAX_VISIBLE),
+    ]
+
+
+class _HookAction(ctypes.Structure):
+    _fields_ = [
+        ("desired_yaw", ctypes.c_float),
+        ("forward", ctypes.c_float),
+        ("side", ctypes.c_float),
+        ("attack", ctypes.c_int32),
+    ]
+
+
+_HOOK_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.POINTER(_HookObservation), ctypes.POINTER(_HookAction), ctypes.c_void_p
+)
+
+
+@dataclass(frozen=True)
+class HookVisible:
+    index: int
+    flags: int  # FL_* bits
+    relative: tuple[float, float, float]  # its origin minus the monster's
+    velocity: tuple[float, float, float]
+    health: float
+    distance: float
+
+
+@dataclass(frozen=True)
+class HookObservation:
+    time: float
+    entity_index: int
+    origin: tuple[float, float, float]
+    velocity: tuple[float, float, float]
+    angles: tuple[float, float, float]  # pitch, yaw, roll in degrees
+    health: float
+    on_ground: bool
+    waterlevel: int
+    rays: np.ndarray  # (len(HOOK_RAY_PITCHES), HOOK_RAY_YAWS) fractions
+    ray_kinds: np.ndarray  # same shape, SURFACE_* values
+    visible: tuple[HookVisible, ...]  # nearest first
+
+
+@dataclass
+class HookAction:
+    desired_yaw: float = 0.0  # absolute facing in degrees
+    forward: float = 0.0  # units per second along the facing
+    side: float = 0.0  # units per second, +right
+    attack: bool = False
+
 
 @dataclass(frozen=True)
 class Entity:
@@ -174,6 +254,12 @@ def _load() -> ctypes.CDLL:
     lib.dqsim_snapshot_save.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     lib.dqsim_snapshot_restore.argtypes = [ctypes.c_void_p]
     lib.dqsim_snapshot_free.argtypes = [ctypes.c_void_p]
+    lib.dqsim_set_policy_hook.argtypes = [
+        ctypes.c_int,
+        _HOOK_CALLBACK,
+        ctypes.c_void_p,
+    ]
+    lib.dqsim_clear_policy_hook.argtypes = []
     lib.dqsim_shutdown.restype = None
     lib.dqsim_shutdown.argtypes = []
     return lib
@@ -279,6 +365,68 @@ def ray_fan(
         )
     )
     return out, kinds
+
+
+_hook_trampoline = None  # keeps the ctypes callback alive
+_hook_policy = None
+
+
+def set_policy_hook(entity_index: int, policy) -> None:
+    """Nominate a monster as policy-driven for the current level (#31).
+
+    ``policy`` is called once per tick with a :class:`HookObservation` and
+    returns a :class:`HookAction` (or None to keep the current facing and
+    do nothing). It replaces that monster's QuakeC decisions; see the brain
+    hook contract in ``dqsim.h``. The policy must not call ``sim``
+    functions. Raises :class:`SimError` if the entity is not a monster or
+    the loaded progs.dat is not the stock one.
+    """
+    global _hook_trampoline, _hook_policy
+
+    def trampoline(obs_ptr, action_ptr, _user):
+        raw = obs_ptr.contents
+        shape = (len(HOOK_RAY_PITCHES), HOOK_RAY_YAWS)
+        observation = HookObservation(
+            time=raw.time,
+            entity_index=raw.entity_index,
+            origin=tuple(raw.origin),
+            velocity=tuple(raw.velocity),
+            angles=tuple(raw.angles),
+            health=raw.health,
+            on_ground=bool(raw.on_ground),
+            waterlevel=int(raw.waterlevel),
+            rays=np.ctypeslib.as_array(raw.rays).copy().reshape(shape),
+            ray_kinds=np.ctypeslib.as_array(raw.ray_kinds).copy().reshape(shape),
+            visible=tuple(
+                HookVisible(
+                    index=v.index,
+                    flags=v.flags,
+                    relative=tuple(v.relative),
+                    velocity=tuple(v.velocity),
+                    health=v.health,
+                    distance=v.distance,
+                )
+                for v in raw.visible[: raw.visible_count]
+            ),
+        )
+        action = policy(observation)
+        if action is not None:
+            action_ptr.contents.desired_yaw = action.desired_yaw
+            action_ptr.contents.forward = action.forward
+            action_ptr.contents.side = action.side
+            action_ptr.contents.attack = int(action.attack)
+
+    _hook_trampoline = _HOOK_CALLBACK(trampoline)
+    _hook_policy = policy
+    _check(_load().dqsim_set_policy_hook(entity_index, _hook_trampoline, None))
+
+
+def clear_policy_hook() -> None:
+    """Remove the policy nomination, if any. Stock AI decides again."""
+    global _hook_trampoline, _hook_policy
+    _check(_load().dqsim_clear_policy_hook())
+    _hook_trampoline = None
+    _hook_policy = None
 
 
 def entities() -> list[Entity]:
