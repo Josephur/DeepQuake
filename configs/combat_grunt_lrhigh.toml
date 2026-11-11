@@ -1,0 +1,30 @@
+# PPO tuning, single variable 2/3 (#38): learning_rate 3e-4 -> 1e-3.
+# Same task and everything else as combat_grunt_only (sparse reward,
+# 200-600 units, LOS-broken, 600-decision timeout, current action
+# layout, entropy_coef unchanged at 0.01). Hypothesis: the policy
+# under-updates on the sparse terminal signal, so it never leaves the
+# near-uniform start (entropy pinned ~5.8 of 6.63 max).
+# Parity bar on the fixed 200 Grunt tasks: shooter 23.0%, random 13.5%.
+#   uv run python -m deepquake.train_combat configs/combat_grunt_lrhigh.toml
+name = "combat_grunt_lrhigh"
+map = "e1m1"
+monster = "monster_army"
+reward = "sparse"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 1e-3
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
