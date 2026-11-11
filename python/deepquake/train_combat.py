@@ -22,47 +22,66 @@ from . import REPO_ROOT, combat, ppo
 from .vec import ProcVecEnv
 
 
+def opponent_list(config: dict) -> list[tuple[str, str]]:
+    """The (map, monster) opponents of a run, in worker order."""
+    if "opponents" in config:
+        return [(entry["map"], entry["monster"]) for entry in config["opponents"]]
+    return [(config.get("map", "e1m1"), config.get("monster", "monster_army"))]
+
+
 def make_env(config: dict, seed: int, index: int) -> combat.CombatEnv:
     """Runs inside a worker process: start its simulator and build the environment."""
     from . import sim
 
     sim.init()
+    map_name, monster = opponent_list(config)[index % len(opponent_list(config))]
     return combat.CombatEnv(
-        config.get("map", "e1m1"),
+        map_name,
         seed=seed * 1000 + index,
         reward=config.get("reward", "damage"),
-        monster=config.get("monster", "monster_army"),
+        monster=monster,
         timeout_steps=int(config.get("timeout_steps", 300)),
     )
 
 
-def train(config: dict, *, max_updates: int | None = None) -> Path:
+def train(config: dict, *, resume: bool = False, max_updates: int | None = None) -> Path:
     """Run training. Returns the run directory."""
     run_dir = REPO_ROOT / "runs" / config["name"]
     checkpoint_path = run_dir / "checkpoint.pt"
-    if checkpoint_path.exists():
-        raise SystemExit(f"{checkpoint_path} exists; choose another name")
+    if checkpoint_path.exists() and not resume:
+        raise SystemExit(f"{checkpoint_path} exists; pass --resume or choose another name")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     ppo.seed_everything(config["seed"])
     device = ppo.pick_device(config.get("device") or None)
     ppo_config = ppo.config_from_dict(config.get("ppo", {}))
+    opponents = opponent_list(config)
+
     model = ppo.ActorCritic(combat.OBS_DIM, combat.ACTION_NVEC, ppo_config.hidden).to(device)
+    start_steps = 0
+    saved = None
+    if resume:
+        model, saved = ppo.load_model(checkpoint_path, device)
+        start_steps = saved["total_steps"]
 
     print(
         f"device: {device}  envs: {config['envs']}  run: {run_dir}\n"
-        f"map: {config.get('map', 'e1m1')}  monster: {config.get('monster', 'monster_army')}  "
-        f"reward: {config.get('reward', 'damage')}",
+        f"opponents: {opponents}  reward: {config.get('reward', 'damage')}",
         flush=True,
     )
     with ProcVecEnv(partial(make_env, config, config["seed"]), config["envs"]) as env:
         learner = ppo.PPO(env, model, ppo_config, device, seed=config["seed"] * 1000)
+        learner.total_steps = start_steps
+        if saved:
+            learner.optimizer.load_state_dict(saved["optimizer"])
         log_path = run_dir / "progress.csv"
-        with log_path.open("w", newline="") as log_file:
+        new_log = not log_path.exists()
+        with log_path.open("a", newline="") as log_file:
             writer = csv.writer(log_file)
-            writer.writerow(
-                ["total_steps", "seconds", "success_rate", "episodes", "mean_reward", "entropy"]
-            )
+            if new_log:
+                writer.writerow(
+                    ["total_steps", "seconds", "success_rate", "episodes", "mean_reward", "entropy"]
+                )
             started = time.time()
             update = 0
             while learner.total_steps < config["total_steps"]:
@@ -79,7 +98,7 @@ def train(config: dict, *, max_updates: int | None = None) -> Path:
                     ]
                 )
                 log_file.flush()
-                rate = stats["total_steps"] / (time.time() - started)
+                rate = (stats["total_steps"] - start_steps) / (time.time() - started)
                 print(
                     f"steps {stats['total_steps']:>9,}  win "
                     f"{stats['successes'] / max(stats['episodes'], 1):5.2f}  "
@@ -94,8 +113,7 @@ def train(config: dict, *, max_updates: int | None = None) -> Path:
                         learner.optimizer,
                         {
                             "total_steps": learner.total_steps,
-                            "map": config.get("map", "e1m1"),
-                            "monster": config.get("monster", "monster_army"),
+                            "opponents": opponents,
                             "reward": config.get("reward", "damage"),
                         },
                     )
@@ -108,6 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("config", type=Path)
     parser.add_argument("--updates", type=int, help="stop after this many updates (for testing)")
+    parser.add_argument("--resume", action="store_true", help="continue from the checkpoint")
     args = parser.parse_args()
 
     config = tomllib.loads(args.config.read_text())
@@ -115,7 +134,7 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.config, run_dir / "config.toml")
 
-    train(config, max_updates=args.updates)
+    train(config, resume=args.resume, max_updates=args.updates)
     print(f"done: {run_dir / 'checkpoint.pt'}")
 
 
