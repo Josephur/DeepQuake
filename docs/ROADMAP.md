@@ -109,12 +109,12 @@ to build (#29, still open).
 
 - [ ] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
 - [ ] Decide how the hook treats maps that ship their own game code (#27)
-- [ ] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt)
-- [ ] Player agent learns combat; opponent pool
-- [ ] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22)
-- [ ] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22)
-- [ ] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert)
-- [ ] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level
+- [ ] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt) (#31)
+- [ ] Research the combat task (episode, reward, termination, opponent pool); the training issue follows from it (#32)
+- [ ] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22) (#33)
+- [ ] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22) (#34)
+- [ ] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert) (#35)
+- [ ] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level (#36)
 
 ## M5 — Play against it
 
