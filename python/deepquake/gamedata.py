@@ -2,6 +2,10 @@
 
 Run ``python -m deepquake.gamedata`` to check that the data is usable.
 Nothing here ever copies game data into the repository.
+
+Custom maps (``.bsp`` files, never committed) go in ``gamedata/id1/maps/``:
+the engine's file search finds loose files there, after the paks, so a
+``gamedata/id1/maps/mymap.bsp`` is loaded as map ``mymap``.
 """
 
 from __future__ import annotations
@@ -171,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     edition = "registered (full game)" if report.registered else "shareware (episode 1 only)"
     print(f"Game data OK: {edition}")
+    loose = base / "id1" / "maps"
+    if loose.is_dir():
+        maps = sorted(p.name for p in loose.glob("*.bsp"))
+        if maps:
+            print(f"custom maps in id1/maps (loadable by name): {', '.join(maps)}")
     return 0
 
 
