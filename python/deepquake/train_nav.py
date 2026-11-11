@@ -23,16 +23,47 @@ from . import REPO_ROOT, nav, ppo
 from .vec import ProcVecEnv
 
 
-def make_env(map_name: str, seed: int, index: int) -> nav.NavEnv:
-    """Runs inside a worker process: start its simulator and build the environment."""
+def make_env(maps: list[str], seed: int, index: int) -> nav.NavEnv:
+    """Runs inside a worker process: start its simulator and build the environment.
+
+    Workers take maps in turn, so a training run draws from every map in the
+    config and each map gets an equal share of the environments.
+    """
     from . import sim
 
     sim.init()
-    return nav.NavEnv(map_name, seed=seed * 1000 + index)
+    return nav.NavEnv(maps[index % len(maps)], seed=seed * 1000 + index)
+
+
+def validate_maps(config: dict) -> tuple[list[str], list[str]]:
+    """Training and held-out map lists, checked before any simulator starts."""
+    if "maps" in config:
+        maps = list(config["maps"])
+    elif "map" in config:
+        maps = [config["map"]]  # the single-map configs that predate multi-map runs
+    else:
+        raise ValueError("the config needs 'maps' (the training maps)")
+    held_out = list(config.get("held_out", []))
+    if not maps:
+        raise ValueError("the config needs at least one training map")
+    if len(set(maps)) != len(maps):
+        raise ValueError(f"duplicate training maps: {maps}")
+    overlap = set(maps) & set(held_out)
+    if overlap:
+        raise ValueError(f"maps both trained on and held out: {sorted(overlap)}")
+    envs = config.get("envs")
+    if envs is not None and len(maps) > envs:
+        raise ValueError(
+            f"{len(maps)} training maps but only {envs} environments: workers take "
+            "maps in turn, so every map needs at least one worker or it is "
+            "silently never trained on"
+        )
+    return maps, held_out
 
 
 def train(config: dict, *, resume: bool = False, max_updates: int | None = None) -> Path:
     """Run training. Returns the run directory."""
+    maps, held_out = validate_maps(config)
     run_dir = REPO_ROOT / "runs" / config["name"]
     checkpoint_path = run_dir / "checkpoint.pt"
     if checkpoint_path.exists() and not resume:
@@ -54,7 +85,8 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
         goal_distance = saved["goal_distance"]
 
     print(f"device: {device}  envs: {config['envs']}  run: {run_dir}")
-    with ProcVecEnv(partial(make_env, config["map"], config["seed"]), config["envs"]) as env:
+    print(f"maps: {', '.join(maps)}  held out: {', '.join(held_out) or 'none'}", flush=True)
+    with ProcVecEnv(partial(make_env, maps, config["seed"]), config["envs"]) as env:
         env.set_attr("max_goal_distance", goal_distance)
         learner = ppo.PPO(env, model, ppo_config, device)
         learner.total_steps = start_steps
@@ -109,7 +141,7 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
                         model,
                         learner.optimizer,
                         {"total_steps": learner.total_steps, "goal_distance": goal_distance,
-                         "map": config["map"]},
+                         "maps": maps, "held_out": held_out},
                     )  # fmt: skip
                 if last:
                     break

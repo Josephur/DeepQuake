@@ -1,0 +1,40 @@
+# Navigation across the id1 levels: reach a goal position. Roadmap M3, issue #19.
+#   uv run python -m deepquake.train_nav configs/nav_maps.toml
+#
+# Map rule, fixed before training and blind to every score: hold out each
+# episode's third level and every deathmatch map. Of the 36 id1 levels, 30
+# build a walk graph in sane time (probe numbers in #19); the six that do not
+# (e1m2, e1m3, e4m2, e4m5, e4m8, dm3 — see #29) are in neither list. That
+# removes e1m3 from the held-out group; the rule still holds for e2m3, e3m3
+# and e4m3.
+name = "nav_maps"
+maps = [
+  "e1m1", "e1m4", "e1m5", "e1m6", "e1m7", "e1m8",
+  "e2m1", "e2m2", "e2m4", "e2m5", "e2m6", "e2m7",
+  "e3m1", "e3m2", "e3m4", "e3m5", "e3m6", "e3m7",
+  "e4m1", "e4m4", "e4m6", "e4m7",
+]
+held_out = ["e2m3", "e3m3", "e4m3", "dm1", "dm2", "dm4", "dm5", "dm6"]
+seed = 0
+envs = 22                 # one worker per training map
+total_steps = 10_000_000  # agent decisions (each is 6 game ticks); about 25 minutes
+device = "3090"           # substring of the CUDA device name; "" for any GPU or CPU
+checkpoint_every = 25     # updates between checkpoints
+
+[curriculum]              # the goal may be up to this far from the start, on foot (map units)
+start = 300.0
+step = 100.0              # added when the success rate reaches the threshold
+max = 2000.0
+threshold = 0.7
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

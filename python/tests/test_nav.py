@@ -1,7 +1,10 @@
 """The navigation environment on a real map. Needs game data."""
 
+import numpy as np
 import pytest
 from test_sim import require_gamedata, run_in_subprocess
+
+from deepquake import nav
 
 NAV = """
 import json
@@ -61,3 +64,52 @@ def test_navigation_environment():
     # The point pool and the evaluation are reproducible across processes.
     assert (out["pool"], out["pool_sum"]) == (again["pool"], again["pool_sum"])
     assert (out["random"], out["beeline"]) == (again["random"], again["beeline"])
+
+
+def _env_without_engine() -> nav.NavEnv:
+    """A NavEnv shell for tests of logic that needs no simulator (#30)."""
+    env = object.__new__(nav.NavEnv)
+    env.map_name = "nowhere"
+    env.skill = 0
+    env.rng = np.random.default_rng(0)
+    env.points = np.array([[0.0, 0.0, 0.0], [839.16, -2833.81, 24.03]], dtype=np.float32)
+    env.path_distance = np.array([[0.0, 500.0], [500.0, 0.0]])
+    env._episodes_since_load = 0
+    return env
+
+
+def test_set_task_retries_a_start_blocked_by_wander(monkeypatch):
+    """A monster on the start spot is seed luck: reload rolls new dice (#30)."""
+    env = _env_without_engine()
+    calls = {"teleport": 0, "load": 0}
+
+    def teleport(origin, yaw=0.0):
+        calls["teleport"] += 1
+        return calls["teleport"] > 2  # blocked at first, free from the third roll
+
+    monkeypatch.setattr(nav.sim, "level_count", lambda: 0)
+    monkeypatch.setattr(nav.sim, "teleport", teleport)
+    monkeypatch.setattr(
+        nav.sim, "load_map", lambda *a, **k: calls.__setitem__("load", calls["load"] + 1)
+    )
+    monkeypatch.setattr(nav.sim, "client_command", lambda *a: None)
+    monkeypatch.setattr(nav.sim, "step", lambda **k: None)
+    monkeypatch.setattr(nav.sim, "player", lambda: None)
+    monkeypatch.setattr(env, "_observe", lambda state: np.zeros(nav.OBS_DIM, np.float32))
+
+    obs = env.set_task(1, 0, 90.0)
+
+    assert obs.shape == (nav.OBS_DIM,) and calls["load"] == 2
+
+
+def test_set_task_gives_up_on_a_never_free_start(monkeypatch):
+    """A spot blocked on every fresh map is a graph bug, and must surface."""
+    env = _env_without_engine()
+    monkeypatch.setattr(nav.sim, "level_count", lambda: 0)
+    monkeypatch.setattr(nav.sim, "teleport", lambda origin, yaw=0.0: False)
+    monkeypatch.setattr(nav.sim, "load_map", lambda *a, **k: None)
+    monkeypatch.setattr(nav.sim, "client_command", lambda *a: None)
+    monkeypatch.setattr(nav.sim, "step", lambda **k: None)
+
+    with pytest.raises(RuntimeError, match="blocked on a fresh map"):
+        env.set_task(0, 1, 0.0)

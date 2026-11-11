@@ -63,6 +63,7 @@ limits of this first policy, each with an issue:
 - The policy has no memory and was trained on one map (#19). Models must
   work on maps they have never seen (ARCHITECTURE.md, "Map independence"),
   so #19 trains on many maps and reports held-out maps separately.
+  **Fixed 2026-11-10 (#19): see the multi-map result below.**
 - No map outside id's own has ever been loaded (#28).
 - Monsters are passive and the player invulnerable during navigation
   training; combat comes in M4.
@@ -79,6 +80,29 @@ tasks were almost all short because fragmentation left nothing longer:
 | Random actions | 4.3% | 14.2 s | 15.3% |
 | Bee-line | 35.7% | 4.0 s | 67.3% |
 | Trained | 75.3% | 5.4 s | 88.3% |
+
+Memory and many maps (2026-11-10, #19: `configs/nav_maps.toml`, GRU
+actor-critic with bptt-chunked PPO, 10,000,000 decisions, about 75 minutes
+with 22 simulator processes — one per training map — at 2,756 decisions/s).
+Trained on 22 of the 30 `id1` levels whose walk graph builds in sane time
+(the other six, e1m2/e1m3/e4m2/e4m5/e4m8/dm3, are #29); held out, by a rule
+fixed before training, the 3rd level of each episode that builds (e2m3,
+e3m3, e4m3) and every buildable deathmatch map (dm1, dm2, dm4, dm5, dm6).
+`eval_nav`, 300 fixed tasks per map, goal 200 to 1,000 units away on foot,
+25 s limit:
+
+| Policy | Training maps (22) | Held-out maps (8) | Held-out mean time |
+| --- | --- | --- | --- |
+| Random actions | 11.9% | 11.2% | 12.0 s |
+| Bee-line | 63.6% | 58.5% | 2.3 s |
+| Trained | 84.7% | **81.6%** | 2.7 s |
+
+The trained policy beats bee-line on every one of the eight held-out maps
+(per-map results in #19), and the gap between training and held-out maps is
+about 3 points: the first evidence that the model reads geometry, not the
+map. Two bugs found on the way, both fixed: some start points are blocked
+by seeded monster wander (#30), and six maps' walk graphs take over an hour
+to build (#29, still open).
 
 ## M4 — First monster brain
 

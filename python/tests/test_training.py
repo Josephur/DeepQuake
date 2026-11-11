@@ -88,7 +88,57 @@ def test_ppo_learns_the_toy_task(tmp_path):
     restored, saved = ppo.load_model(path)
     assert saved["total_steps"] == learner.total_steps
     obs = torch.as_tensor(env.first_obs)
-    assert torch.equal(model.act(obs, greedy=True)[0], restored.act(obs, greedy=True)[0])
+    hidden = model.initial_hidden(len(env.first_obs))
+    first_actions = model.act(obs, hidden, greedy=True)
+    again_actions = restored.act(obs, hidden, greedy=True)
+    assert torch.equal(first_actions[0], again_actions[0])
+    assert torch.equal(first_actions[3], again_actions[3])  # the memory agrees too
+
+
+def test_the_recurrent_state_changes_the_decision():
+    """The core must use its memory: the same view from two states differs."""
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import ppo
+
+    ppo.seed_everything(0)
+    model = ppo.ActorCritic(toy.OBS_DIM, toy.ACTION_NVEC, hidden=16)
+    obs = torch.zeros(1, toy.OBS_DIM)
+    blind = model.initial_hidden(1)
+    primed = torch.ones(1, model.hidden)
+    logits_blind = model.distributions(model.advance(obs, blind))[0].logits
+    logits_primed = model.distributions(model.advance(obs, primed))[0].logits
+    assert not torch.allclose(logits_blind, logits_primed)
+
+    # The state is carried into the next decision, not rebuilt from the view.
+    _, _, _, state = model.act(obs, blind, greedy=True)
+    assert not torch.allclose(state, blind)
+
+
+def test_a_memoryless_checkpoint_is_refused(tmp_path):
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import ppo
+
+    path = tmp_path / "old.pt"
+    torch.save(
+        {
+            "spec": {"obs_dim": toy.OBS_DIM, "action_nvec": toy.ACTION_NVEC, "hidden": 16},
+            "model": {},
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match="memoryless"):
+        ppo.load_model(path)
+
+
+def test_ppo_rejects_a_rollout_that_does_not_split_into_sequences():
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import ppo
+
+    env = InProcessVecEnv(2)
+    config = ppo.PPOConfig(steps_per_env=10, bptt=4)
+    model = ppo.ActorCritic(toy.OBS_DIM, toy.ACTION_NVEC, hidden=8)
+    with pytest.raises(ValueError, match="multiple of"):
+        ppo.PPO(env, model, config, torch.device("cpu"))
 
 
 def test_ppo_config_rejects_unknown_settings():
@@ -97,3 +147,25 @@ def test_ppo_config_rejects_unknown_settings():
 
     with pytest.raises(ValueError, match="learning_rat"):
         ppo.config_from_dict({"learning_rat": 1e-3})
+
+
+def test_training_maps_must_be_disjoint_from_held_out_maps():
+    from deepquake.train_nav import validate_maps
+
+    maps, held_out = validate_maps({"maps": ["e1m1", "e1m2"], "held_out": ["e1m3"]})
+    assert maps == ["e1m1", "e1m2"] and held_out == ["e1m3"]
+    # The old single-map configs still work.
+    assert validate_maps({"map": "e1m1"}) == (["e1m1"], [])
+    with pytest.raises(ValueError, match="both trained on and held out"):
+        validate_maps({"maps": ["e1m1"], "held_out": ["e1m1"]})
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_maps({"maps": ["e1m1", "e1m1"]})
+    with pytest.raises(ValueError, match="at least one training map"):
+        validate_maps({"maps": []})
+    with pytest.raises(ValueError, match="needs 'maps'"):
+        validate_maps({})
+    # Every map needs a worker: the round-robin would otherwise skip it silently.
+    with pytest.raises(ValueError, match="never trained on"):
+        validate_maps({"maps": ["e1m1", "e1m2", "e1m3"], "envs": 2})
+    assert validate_maps({"maps": ["e1m1", "e1m2"], "envs": 2}) == (["e1m1", "e1m2"], [])
+    assert validate_maps({"maps": ["e1m1"], "envs": 4}) == (["e1m1"], [])  # maps repeat

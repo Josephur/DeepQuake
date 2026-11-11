@@ -775,10 +775,16 @@ class NavEnv:
         self._episodes_since_load += 1
         start = tuple(float(v) for v in self.points[start_index])
         if not sim.teleport(start, yaw):
-            # Something (a door, a lift) has moved onto the spot; a fresh map fixes it.
-            self._load_map()
-            self._episodes_since_load = 1
-            if not sim.teleport(start, yaw):
+            # Something has moved onto the spot. A fresh map fixes doors and
+            # lifts; a monster standing there does not, because its wander is
+            # seeded by the load seed (blocked at 7 of 20 seeds on e3m6, #30),
+            # and _load_map draws a new seed each call — so keep rolling.
+            for _ in range(5):
+                self._load_map()
+                self._episodes_since_load = 1
+                if sim.teleport(start, yaw):
+                    break
+            else:
                 raise RuntimeError(f"start point {start} is blocked on a fresh map")
         self.goal_index = int(goal_index)
         self.goal = self.points[goal_index]
@@ -799,7 +805,18 @@ class NavEnv:
             )
             if len(candidates):
                 return start, int(rng.choice(candidates)), float(rng.uniform(0, 360))
-        raise RuntimeError("no start and goal pair found within the distance range")
+        # Unlucky draws (or a map whose routes are short): look at every start.
+        for start in range(len(self.points)):
+            distances = self.path_distance[start]
+            candidates = np.flatnonzero(
+                (distances >= self.min_goal_distance) & (distances <= self.max_goal_distance)
+            )
+            if len(candidates):
+                return start, int(rng.choice(candidates)), float(rng.uniform(0, 360))
+        raise RuntimeError(
+            f"no start and goal pair on {self.map_name} within "
+            f"{self.min_goal_distance:.0f}-{self.max_goal_distance:.0f} walking units"
+        )
 
     def reset(self) -> np.ndarray:
         """Begin an episode with a random task within the curriculum range."""

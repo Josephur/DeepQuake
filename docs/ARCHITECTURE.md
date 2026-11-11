@@ -202,8 +202,14 @@ Small recurrent policies trained from scratch with PPO, on the order of 10⁵ to
 72 Hz for dozens of monsters, so each decision has a budget well under a
 millisecond, and the inputs are geometry and kinematics, not text.
 
-The first policy (navigation) is a plain two-layer MLP with no memory,
-about 150,000 parameters; a recurrent core is the next step.
+The first policy (navigation) is a GRU actor-critic of about 245,000
+parameters: one recurrent cell from the observation to a hidden state,
+with a categorical head per action group and a value head reading the same
+state. The hidden state starts at zero each episode and is carried across
+the rollout; PPO updates it through backpropagation through time over
+fixed-length chunks of the rollout, replayed from their recorded starting
+states. It was trained on 22 `id1` levels and evaluated on 8 it never saw
+(#19): the held-out group is where map independence (below) is measured.
 
 **One shared network for all monster types, not one network each.** Most of
 what a monster must learn is the same for every type: reading geometry from
