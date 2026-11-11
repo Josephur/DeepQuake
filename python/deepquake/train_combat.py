@@ -3,9 +3,9 @@
     uv run python -m deepquake.train_combat configs/combat_<name>.toml
 
 Writes to ``runs/<name>/``: ``progress.csv``, ``checkpoint.pt`` (loads with
-:func:`deepquake.ppo.load_model`), and a copy of the config. One map, one
-monster type and one reward variant per run — the #32 comparisons hold
-everything else fixed.
+:func:`deepquake.ppo.load_model`), and a copy of the config. A run trains
+against one reward variant and either a single ``map``/``monster`` pair or
+an ``opponents`` list of them, which the workers take in turn.
 """
 
 from __future__ import annotations
