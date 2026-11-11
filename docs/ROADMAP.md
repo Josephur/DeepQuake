@@ -145,6 +145,22 @@ both baselines on the trained opponents) is **not met** and the issue
 stays open; the numbers stand as measured rather than re-rolled. The
 working branch is `issue-38-combat-training`.
 
+Second attempt (2026-11-11, #38 after the #39 diagnosis:
+`configs/combat_pool2.toml`, training episodes start at 100–350 units
+with line of sight allowed instead of 200–600 with it broken, same
+opponents and sparse reward, 10,000,000 decisions). Same fixed tasks:
+
+| Policy | Grunt, e1m1 (trained) | Ogre, e1m4 (trained) | Knight, e1m4 (held-out type) | Ogre, e1m5 (held-out map) |
+| --- | --- | --- | --- | --- |
+| Random actions | 15.5% | 0.0% | 3.0% | 2.5% |
+| Scripted shooter | 25.0% | 9.5% | 9.0% | 22.5% |
+| Trained | 16.0% | 0.0% | 4.5% | 3.5% |
+
+Placement was not the lever either: the bar is still not met, and the
+next suspect named by #39 is the action representation itself (turn
+quantisation, no pitch aim), which is a design question rather than
+more training budget.
+
 ## M4 — First monster brain
 
 - [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
