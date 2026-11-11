@@ -108,6 +108,48 @@ existing QuakeC code still plays the animation and applies the damage. With no
 model loaded for a monster type the stock AI runs unchanged, so the game is
 always playable.
 
+#### Custom game code (mods) (#27)
+
+Many custom maps ship a mod directory whose `progs.dat` replaces id1's: a
+`monster_army` there may have different health, attacks or think functions,
+or sit next to monsters no policy knows. Classname alone therefore cannot
+mean "a monster we know how to control". Decided:
+
+- **A monster is policy-driven only when both hold:** its classname has a
+  trained policy, **and** the `progs.dat` loaded for the level is
+  byte-identical to the stock id1 `progs.dat` the policies were trained
+  with. Identity is the loaded file's length and a hash of the whole file
+  (the engine already CRCs the whole file in `PR_LoadProgs`); the
+  `progs.dat` header CRC is not an identity — it only versions the system
+  variables. Byte identity guarantees the entity fields, think functions
+  and attack behaviour the hook and the training relied on, with no
+  per-function guessing. A mod that ships an unmodified copy of the stock
+  `progs.dat` passes, as do the many custom maps that ship none.
+- **The gate is per level, not per monster**, because `progs.dat` is loaded
+  per level: if it differs, no monster in that level is policy-driven, even
+  a familiar classname. Everything else is untouched — the mod's game code
+  still runs exactly as the stock engine would run it (its weapons, rules
+  and new monsters included); only the decision replacement is withheld,
+  and unknown classnames keep the stock AI in every case. This is map
+  independence rule 4 below, made concrete. It is a compatibility check,
+  not a security boundary: a mod is code the user chose to run, exactly as
+  with the stock engine.
+- **The simulator must be able to load a mod at all** before any of this
+  can be tested: today `dqsim_init` passes only `-basedir`, so only `id1`
+  is ever searched. M4 therefore adds an optional game directory to
+  `dqsim_config` (a single directory name under the basedir, passed to the
+  engine as `-game`; unset means `id1` only) and a way to ask libdqsim
+  whether the loaded `progs.dat` is the stock one. Training stays on `id1`
+  by configuration, not by engine limitation.
+- **Split:** the game directory, the identity query and the gate itself
+  are M4 (the hook, #31, refuses or ignores a nomination the gate rejects,
+  so the stock think runs). M5 needs no new mechanism: the client already
+  starts with the user's `-game` directory as stock Quake does, and the
+  same gate in the shared engine code withholds the policy there. Relaxing
+  byte identity later (for example to "the QuakeC functions and fields the
+  hook uses are present and unmodified") is possible, but only with
+  evidence that real mods need it; it is not M4 work.
+
 ### 3. Observations and actions
 
 Chosen to be cheap to compute in the simulator and identical in the client:

@@ -130,7 +130,7 @@ recovers the old scores is future work, not part of #26.
 ## M4 — First monster brain
 
 - [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
-- [ ] Decide how the hook treats maps that ship their own game code (#27)
+- [x] Decide how the hook treats maps that ship their own game code (#27)
 - [ ] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt) (#31)
 - [ ] Research the combat task (episode, reward, termination, opponent pool); the training issue follows from it (#32)
 - [ ] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22) (#33)
