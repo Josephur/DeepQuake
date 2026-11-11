@@ -19,7 +19,7 @@ result = env.step(np.array([2, 1, 2, 0]))
 tasks = make_tasks(env, 40, 100.0, 300.0, seed=1)
 random = evaluate(env, nav.random_policy(np.random.default_rng(0)), tasks)
 beeline = evaluate(env, nav.beeline_policy, tasks)
-rays = sim.ray_fan((0.0, 30.0), 8, 512.0)
+rays, kinds = sim.ray_fan((0.0, 30.0), 8, 512.0)
 classes = sorted({e.classname for e in sim.entities()})
 print(json.dumps({
     "pool": len(env.points), "pool_sum": float(env.points.sum()),
@@ -27,10 +27,12 @@ print(json.dumps({
     "connected": float((np.isfinite(env.path_distance) | np.isfinite(env.path_distance).T).mean()),
     "obs_shape": list(obs.shape), "obs_dtype": str(obs.dtype),
     "obs_min": float(obs.min()), "obs_max": float(obs.max()),
-    "goal_unit": float(np.hypot(obs[52], obs[53])),
+    "goal_unit": float(np.hypot(obs[100], obs[101])),
     "reward": result.reward, "done": result.done,
     "random": random["success_rate"], "beeline": beeline["success_rate"],
-    "rays_shape": list(rays.shape), "classes": classes,
+    "rays_shape": list(rays.shape), "kinds_shape": list(kinds.shape),
+    "kinds_dtype": str(kinds.dtype), "kinds_min": int(kinds.min()),
+    "kinds_max": int(kinds.max()), "classes": classes,
     "teleport_blocked": sim.teleport((1e5, 1e5, 1e5)),
 }))
 """
@@ -52,11 +54,13 @@ def test_navigation_environment():
     # connectivity. The reverse floor keeps one-way links honest.
     assert out["connected"] > 0.80
     assert out["reachable"] > 0.70
-    assert out["obs_shape"] == [56] and out["obs_dtype"] == "float32"
+    assert out["obs_shape"] == [104] and out["obs_dtype"] == "float32"
     assert out["obs_min"] >= -2.0 and out["obs_max"] <= 2.0
     assert abs(out["goal_unit"] - 1.0) < 1e-4
     assert not out["done"]
     assert out["rays_shape"] == [2, 8]
+    assert out["kinds_shape"] == [2, 8] and out["kinds_dtype"] == "uint8"
+    assert 0 <= out["kinds_min"] <= out["kinds_max"] <= 6
     assert "monster_army" in out["classes"] and "player" in out["classes"]
     assert out["teleport_blocked"] is False
     # Heading for the goal beats moving at random on short tasks.

@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory() as tmp:
     spawn = sim.player()
     sim.step(forward=100.0, yaw=90.0, repeat=72)  # one second of running, +y
     moved = sim.player()
-    rays = sim.ray_fan((0.0,), 8, 2048.0)
+    rays, _kinds = sim.ray_fan((0.0,), 8, 2048.0)
     classes = sorted({e.classname for e in sim.entities()})
     first_hash = sim.state_hash()
     blocked = [sim.teleport(point, 0.0) for point in

@@ -188,7 +188,9 @@ for being hard to beat at the given skill, and evaluated at each skill
 level against the stock QuakeC monster at the same level.
 
 **Implemented so far** (navigation only, `python/deepquake/nav.py`, whose
-docstring holds the exact layout): 48 ray distances, own velocity and
+docstring holds the exact layout): 48 ray distances and the 48 matching
+ray surface kinds (what each ray hit: world, moving brush, water, slime,
+lava, sky, or nothing), own velocity and
 on-ground flag, and the direction and distance to the goal; four discrete
 action heads (forward/back, strafe, turn, jump) held for 6 ticks. The engine
 provides the primitives (`dqsim_ray_fan`, `dqsim_get_entities`); the

@@ -105,9 +105,31 @@ map. Two bugs found on the way, both fixed: some start points are blocked
 by seeded monster wander (#30), and six maps' walk graphs take over an hour
 to build (#29, still open).
 
+Ray kinds in the observation (2026-11-11, #26: `configs/nav_maps2.toml`,
+same maps, curriculum, PPO settings and 10,000,000 decisions as `nav_maps`;
+the observation gained one surface-kind channel per ray, OBS_DIM 56 → 104,
+so the old checkpoint could not be reused). Training ran at 7,598
+decisions/s after the walk graphs built (the slowest, e2m7, took about an
+hour and gated the first update). `eval_nav`, 300 fixed tasks per map, goal
+200 to 1,000 units away on foot, 25 s limit — the same task list as above:
+
+| Policy | Training maps (22) | Held-out maps (8) | Held-out mean time |
+| --- | --- | --- | --- |
+| Random actions | 11.4% | 12.1% | 11.7 s |
+| Bee-line | 64.0% | 57.5% | 2.5 s |
+| Trained | 70.9% | **72.7%** | 7.0 s |
+
+The retrained policy still beats both baselines on the held-out group and
+on seven of its eight maps (dm4 is the exception: 57.7% against bee-line's
+60.0%), but it is below `nav_maps` (84.7% / 81.6%) and much slower to the
+goal (7.0 s against 2.7 s). That is the measured cost of this run, not a
+reason to re-roll it: the kind channel is in place before any monster is
+trained, which is what #26 required. Whether a longer or re-tuned run
+recovers the old scores is future work, not part of #26.
+
 ## M4 — First monster brain
 
-- [ ] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
+- [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
 - [ ] Decide how the hook treats maps that ship their own game code (#27)
 - [ ] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt) (#31)
 - [ ] Research the combat task (episode, reward, termination, opponent pool); the training issue follows from it (#32)

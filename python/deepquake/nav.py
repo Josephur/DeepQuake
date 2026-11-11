@@ -26,13 +26,16 @@ slice                 size   meaning
 ``[0:48]``            48     ray distances, 2 pitch rows x 24 yaw columns,
                              fraction of :data:`RAY_DISTANCE` (see
                              :func:`deepquake.sim.ray_fan`)
-``[48:51]``           3      velocity in the player's frame (forward, left,
+``[48:96]``           48     kind of the same rays, in the same order:
+                             ``SURFACE_*`` / 6 (0 nothing, 1 world, 2 moving
+                             brush, 3 water, 4 slime, 5 lava, 6 sky)
+``[96:99]``           3      velocity in the player's frame (forward, left,
                              up) divided by 400
-``[51]``              1      1 if standing on ground
-``[52:54]``           2      unit vector to the goal in the player's frame
+``[99]``              1      1 if standing on ground
+``[100:102]``         2      unit vector to the goal in the player's frame
                              (forward, left)
-``[54]``              1      goal height difference / 256, clipped to +-1
-``[55]``              1      horizontal goal distance / 1024, clipped to 2
+``[102]``             1      goal height difference / 256, clipped to +-1
+``[103]``             1      horizontal goal distance / 1024, clipped to 2
 ====================  =====  ==============================================
 
 Action (4 integers, :data:`ACTION_NVEC`): forward {back, none, forward},
@@ -54,7 +57,7 @@ from . import sim
 RAY_PITCHES = (0.0, 30.0)
 RAY_YAWS = 24
 RAY_DISTANCE = 768.0
-OBS_DIM = len(RAY_PITCHES) * RAY_YAWS + 8
+OBS_DIM = 2 * len(RAY_PITCHES) * RAY_YAWS + 8
 ACTION_NVEC = (3, 3, 5, 2)
 
 FRAME_SKIP = 6  # ticks per decision: 12 decisions per second
@@ -191,7 +194,7 @@ def explore_walk_graph(
         wet_gap = False  # swum since the last standing position
         wet_previous = None  # last cell linked while swimming
         for _ in range(int(seconds * 72 / FRAME_SKIP)):
-            rays = sim.ray_fan((0.0,), RAY_YAWS, RAY_DISTANCE)[0]
+            rays = sim.ray_fan((0.0,), RAY_YAWS, RAY_DISTANCE)[0][0]  # distances, sole pitch row
             view = sim.player().view_angles[1] % 360
             blocked = rays[0] * RAY_DISTANCE < 80.0
             pushing = blocked  # most blockers are doors that open on touch
@@ -330,7 +333,7 @@ def _probe_walk(target: np.ndarray, ticks: int = _PROBE_TICKS) -> bool:
         desired = (
             math.degrees(math.atan2(target[1] - state.origin[1], target[0] - state.origin[0])) % 360
         )
-        rays = sim.ray_fan((0.0,), RAY_YAWS, RAY_DISTANCE)[0]
+        rays = sim.ray_fan((0.0,), RAY_YAWS, RAY_DISTANCE)[0][0]  # distances, sole pitch row
         view = state.view_angles[1] % 360
         straight = rays[int(round(((desired - view) % 360) / column_degrees)) % RAY_YAWS]
         # In water, swim to the target's depth: the way between two pools of
@@ -864,23 +867,26 @@ class NavEnv:
     def _observe(self, state: sim.PlayerState) -> np.ndarray:
         obs = np.empty(OBS_DIM, dtype=np.float32)
         n_rays = len(RAY_PITCHES) * RAY_YAWS
-        obs[:n_rays] = sim.ray_fan(RAY_PITCHES, RAY_YAWS, RAY_DISTANCE).ravel()
+        distances, kinds = sim.ray_fan(RAY_PITCHES, RAY_YAWS, RAY_DISTANCE)
+        obs[:n_rays] = distances.ravel()
+        obs[n_rays : 2 * n_rays] = kinds.ravel() / 6.0
 
+        base = 2 * n_rays
         yaw = math.radians(state.view_angles[1])
         cos, sin = math.cos(yaw), math.sin(yaw)
         vx, vy, vz = state.velocity
-        obs[n_rays + 0] = (vx * cos + vy * sin) / 400.0
-        obs[n_rays + 1] = (-vx * sin + vy * cos) / 400.0
-        obs[n_rays + 2] = vz / 400.0
-        obs[n_rays + 3] = float(state.on_ground)
+        obs[base + 0] = (vx * cos + vy * sin) / 400.0
+        obs[base + 1] = (-vx * sin + vy * cos) / 400.0
+        obs[base + 2] = vz / 400.0
+        obs[base + 3] = float(state.on_ground)
 
         dx, dy = self.goal[0] - state.origin[0], self.goal[1] - state.origin[1]
         distance = math.hypot(dx, dy)
         scale = 1.0 / max(distance, 1e-6)
-        obs[n_rays + 4] = (dx * cos + dy * sin) * scale
-        obs[n_rays + 5] = (-dx * sin + dy * cos) * scale
-        obs[n_rays + 6] = np.clip((self.goal[2] - state.origin[2]) / 256.0, -1.0, 1.0)
-        obs[n_rays + 7] = min(distance / 1024.0, 2.0)
+        obs[base + 4] = (dx * cos + dy * sin) * scale
+        obs[base + 5] = (-dx * sin + dy * cos) * scale
+        obs[base + 6] = np.clip((self.goal[2] - state.origin[2]) / 256.0, -1.0, 1.0)
+        obs[base + 7] = min(distance / 1024.0, 2.0)
         return obs
 
 
@@ -898,8 +904,8 @@ def random_policy(rng: np.random.Generator):
 
 def beeline_policy(obs: np.ndarray) -> np.ndarray:
     """Turn toward the goal and run at it, ignoring walls."""
-    n_rays = len(RAY_PITCHES) * RAY_YAWS
-    forward, left = obs[n_rays + 4], obs[n_rays + 5]
+    base = 2 * len(RAY_PITCHES) * RAY_YAWS
+    forward, left = obs[base + 4], obs[base + 5]
     angle = math.degrees(math.atan2(left, forward))  # + means the goal is to the left
     if angle > 20:
         turn = 4

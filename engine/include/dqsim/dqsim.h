@@ -128,16 +128,34 @@ DQSIM_API int dqsim_client_command(const char *command);
 DQSIM_API int dqsim_teleport_player(const float origin[3], float yaw);
 
 /*
+ * What a ray ran into. Ordered so that "nothing" is zero and the liquids
+ * sit together, matching the observation encoding in python/deepquake/nav.py.
+ */
+enum dqsim_surface {
+    DQSIM_SURFACE_NOTHING = 0, /* nothing within max_distance */
+    DQSIM_SURFACE_WORLD = 1,   /* solid world geometry */
+    DQSIM_SURFACE_BRUSH = 2,   /* a moving brush entity: door, platform, train */
+    DQSIM_SURFACE_WATER = 3,   /* liquids are reported where the ray enters */
+    DQSIM_SURFACE_SLIME = 4,   /* them, not where it reaches their floor */
+    DQSIM_SURFACE_LAVA = 5,
+    DQSIM_SURFACE_SKY = 6,
+};
+
+/*
  * Cast rays from the player's eye and report how far each travels before
- * hitting the world or a door, as a fraction of max_distance in [0, 1].
+ * hitting something, as a fraction of max_distance in [0, 1], and what it
+ * hit. A ray that enters a liquid reports the liquid at the entry; one
+ * that hits no solid and crosses no liquid reports DQSIM_SURFACE_NOTHING
+ * with a fraction of 1.
  *
- * There are n_pitch * n_yaw rays, written to out row by row: one row per
- * entry of pitches (degrees, + is down), and in each row n_yaw rays evenly
- * spaced over 360 degrees, the first along the player's view yaw and the
- * rest counter-clockwise. Other entities (monsters, items) are ignored.
+ * There are n_pitch * n_yaw rays, written row by row: one row per entry of
+ * pitches (degrees, + is down), and in each row n_yaw rays evenly spaced
+ * over 360 degrees, the first along the player's view yaw and the rest
+ * counter-clockwise. Other entities (monsters, items) are ignored, doors
+ * and platforms are not. out_kind may be NULL to skip classification.
  */
 DQSIM_API int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distance,
-                            float *out);
+                            float *out, unsigned char *out_kind);
 
 /*
  * Copy up to max entities that are in use into out. Returns the number of

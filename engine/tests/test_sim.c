@@ -128,20 +128,66 @@ int main(int argc, char **argv)
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "get_player");
     CHECK(fabsf(player.origin[0] - deathmatch_spot->origin[0]) < 0.01f, "teleport position");
 
-    /* Rays: fractions in [0, 1]; in a level some hit walls and some do not. */
+    /* Rays: fractions in [0, 1]; in a level some hit walls and some do not.
+     * Kinds are one of the seven surface values; a blocked ray is never
+     * NOTHING, an unblocked one never reports a surface. */
     const float pitches[2] = {0, 30};
     float rays[2 * 16];
-    CHECK(dqsim_ray_fan(pitches, 2, 16, 512, rays) == DQSIM_OK, "ray_fan");
+    unsigned char kinds[2 * 16];
+    CHECK(dqsim_ray_fan(pitches, 2, 16, 512, rays, kinds) == DQSIM_OK, "ray_fan");
     int blocked = 0;
     for (int i = 0; i < 32; i++) {
         CHECK(rays[i] >= 0 && rays[i] <= 1, "ray %d fraction %f", i, rays[i]);
-        if (rays[i] < 1)
+        CHECK(kinds[i] <= DQSIM_SURFACE_SKY, "ray %d kind %d", i, kinds[i]);
+        if (rays[i] < 1) {
             blocked++;
+            CHECK(kinds[i] != DQSIM_SURFACE_NOTHING, "blocked ray %d hit nothing", i);
+        } else {
+            CHECK(kinds[i] == DQSIM_SURFACE_NOTHING, "clear ray %d kind %d", i, kinds[i]);
+        }
     }
     CHECK(blocked >= 16, "only %d of 32 rays hit anything", blocked);
     /* Every downward ray must hit the floor well before 512 units. */
     for (int i = 16; i < 32; i++)
         CHECK(rays[i] < 0.9f, "downward ray %d did not hit the floor", i);
+
+    /*
+     * Ray kinds at fixed spots on fixed maps (#26): a single ray along the
+     * view yaw from a teleported position, measured once on this build and
+     * hard-coded; the engine treats sky like water (it passes through the
+     * volume), so all three hazard kinds come from the contents march.
+     */
+    static const struct {
+        const char *map;
+        float at[3];
+        float pitch;
+        int kind;
+    } kind_spots[] = {
+        /* e1m1's opening corridor walls; its nether slime pool. */
+        {"e1m1", {480, -352, 89}, 0, DQSIM_SURFACE_WORLD},
+        {"e1m1", {932, 2236, 24}, 70, DQSIM_SURFACE_SLIME},
+        /* A shut door on e1m1 (a moving brush, not world geometry). */
+        {"e1m1", {52, 564, 96}, 0, DQSIM_SURFACE_BRUSH},
+        /* e1m2's moat, entered at the surface (met before the floor). */
+        {"e1m2", {800, 368, 339}, 30, DQSIM_SURFACE_WATER},
+        /* e1m5's courtyard sky, reached from below. */
+        {"e1m5", {296, 2500, 480}, -80, DQSIM_SURFACE_SKY},
+        /* e1m7's lake, from the platform above it. */
+        {"e1m7", {304, 64, -48}, 30, DQSIM_SURFACE_LAVA},
+    };
+    for (size_t s = 0; s < sizeof(kind_spots) / sizeof(*kind_spots); s++) {
+        CHECK(dqsim_load_map(kind_spots[s].map, 0, 1) == DQSIM_OK,
+              "load %s", kind_spots[s].map);
+        CHECK(dqsim_teleport_player(kind_spots[s].at, 0) == DQSIM_OK,
+              "teleport to %s spot", kind_spots[s].map);
+        float one_ray;
+        unsigned char kind = 0xff;
+        CHECK(dqsim_ray_fan(&kind_spots[s].pitch, 1, 1, 2048, &one_ray, &kind) == DQSIM_OK,
+              "kind ray on %s", kind_spots[s].map);
+        CHECK(kind == kind_spots[s].kind, "%s ray kind %d, wanted %d (fraction %f)",
+              kind_spots[s].map, kind, kind_spots[s].kind, one_ray);
+        CHECK(one_ray > 0 && one_ray < 1, "%s ray fraction %f", kind_spots[s].map, one_ray);
+    }
 
     /* Client commands: god mode sets the flag on the player. */
     CHECK(dqsim_client_command("god") == DQSIM_OK, "client_command");

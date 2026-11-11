@@ -160,6 +160,7 @@ def _load() -> ctypes.CDLL:
         ctypes.c_int,
         ctypes.c_float,
         ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_ubyte),
     ]
     lib.dqsim_get_entities.argtypes = [ctypes.POINTER(_Entity), ctypes.c_int]
     lib.dqsim_map_name.restype = ctypes.c_char_p
@@ -243,14 +244,30 @@ def teleport(origin: tuple[float, float, float], yaw: float = 0.0) -> bool:
     return _load().dqsim_teleport_player((ctypes.c_float * 3)(*origin), yaw) == 0
 
 
-def ray_fan(pitches: tuple[float, ...], n_yaw: int, max_distance: float) -> np.ndarray:
-    """Distances to the world along a fan of rays from the player's eye.
+#: What a ray hit, mirroring ``enum dqsim_surface`` in dqsim.h. Liquids and
+#: sky are reported where the ray enters them, not at their floor.
+SURFACE_NOTHING = 0
+SURFACE_WORLD = 1
+SURFACE_BRUSH = 2
+SURFACE_WATER = 3
+SURFACE_SLIME = 4
+SURFACE_LAVA = 5
+SURFACE_SKY = 6
 
-    Returns shape ``(len(pitches), n_yaw)``, float32 in [0, 1] as a fraction
-    of ``max_distance``. Each row is one pitch (degrees, + is down); column 0
-    points along the view yaw and the rest go counter-clockwise.
+
+def ray_fan(
+    pitches: tuple[float, ...], n_yaw: int, max_distance: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Distances and surface kinds along a fan of rays from the player's eye.
+
+    Returns ``(distances, kinds)``, each of shape ``(len(pitches), n_yaw)``.
+    Distances are float32 in [0, 1] as a fraction of ``max_distance``; kinds
+    are uint8 ``SURFACE_*`` values for the same ray. Each row is one pitch
+    (degrees, + is down); column 0 points along the view yaw and the rest go
+    counter-clockwise.
     """
     out = np.empty((len(pitches), n_yaw), dtype=np.float32)
+    kinds = np.empty((len(pitches), n_yaw), dtype=np.uint8)
     _check(
         _load().dqsim_ray_fan(
             (ctypes.c_float * len(pitches))(*pitches),
@@ -258,9 +275,10 @@ def ray_fan(pitches: tuple[float, ...], n_yaw: int, max_distance: float) -> np.n
             n_yaw,
             max_distance,
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            kinds.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte)),
         )
     )
-    return out
+    return out, kinds
 
 
 def entities() -> list[Entity]:

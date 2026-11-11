@@ -304,7 +304,58 @@ int dqsim_teleport_player(const float origin[3], float yaw)
     return DQSIM_OK;
 }
 
-int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distance, float *out)
+/*
+ * What one ray ran into (#26). A solid trace alone cannot tell lava from
+ * floor, and the engine's hull trace passes through sky exactly as it
+ * passes through water (world.c: SV_RecursiveHullCheck treats CONTENTS_SKY
+ * as water), so the ray also steps along its own path and reports a liquid
+ * or sky volume at the first step inside it. That ordering is what an eye
+ * would see: the first non-empty thing along the line. The one thing the
+ * march never sees is sky directly behind a wall within one step of it,
+ * where the wall has already won.
+ * Sets *out_frac to the fraction of max_distance where the reported thing
+ * was met.
+ */
+static unsigned char classify_ray(vec3_t eye, vec3_t forward, float max_distance,
+                                  const trace_t *trace, float *out_frac)
+{
+    const float step = 8.0f; /* liquid and sky entries land within one step */
+    vec3_t probe;
+
+    if (trace->startsolid) {
+        *out_frac = 0.0f;
+        switch (SV_PointContents(eye)) {
+        case CONTENTS_WATER: return DQSIM_SURFACE_WATER;
+        case CONTENTS_SLIME: return DQSIM_SURFACE_SLIME;
+        case CONTENTS_LAVA: return DQSIM_SURFACE_LAVA;
+        case CONTENTS_SKY: return DQSIM_SURFACE_SKY;
+        default: return DQSIM_SURFACE_WORLD;
+        }
+    }
+
+    float reach = trace->fraction * max_distance;
+    for (float d = step; d < reach; d += step) {
+        VectorMA(eye, d, forward, probe);
+        switch (SV_PointContents(probe)) {
+        case CONTENTS_WATER: *out_frac = d / max_distance; return DQSIM_SURFACE_WATER;
+        case CONTENTS_SLIME: *out_frac = d / max_distance; return DQSIM_SURFACE_SLIME;
+        case CONTENTS_LAVA: *out_frac = d / max_distance; return DQSIM_SURFACE_LAVA;
+        case CONTENTS_SKY: *out_frac = d / max_distance; return DQSIM_SURFACE_SKY;
+        }
+    }
+
+    if (trace->fraction >= 1.0f) {
+        *out_frac = 1.0f;
+        return DQSIM_SURFACE_NOTHING;
+    }
+    *out_frac = trace->fraction;
+    if (trace->ent && trace->ent != sv.edicts)
+        return DQSIM_SURFACE_BRUSH; /* a door, a platform, a train */
+    return DQSIM_SURFACE_WORLD;
+}
+
+int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distance, float *out,
+                  unsigned char *out_kind)
 {
     if (!pitches || !out || n_pitch < 1 || n_yaw < 1 || max_distance <= 0)
         return fail("dqsim_ray_fan: invalid arguments");
@@ -324,7 +375,11 @@ int dqsim_ray_fan(const float *pitches, int n_pitch, int n_yaw, float max_distan
             AngleVectors(angles, forward, right, up);
             VectorMA(eye, max_distance, forward, end);
             trace_t trace = SV_Move(eye, vec3_origin, vec3_origin, end, MOVE_NOMONSTERS, ent);
-            out[p * n_yaw + y] = trace.startsolid ? 0.0f : trace.fraction;
+            float fraction;
+            unsigned char kind = classify_ray(eye, forward, max_distance, &trace, &fraction);
+            out[p * n_yaw + y] = fraction;
+            if (out_kind)
+                out_kind[p * n_yaw + y] = kind;
         }
     }
     return DQSIM_OK;
