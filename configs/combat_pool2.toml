@@ -1,0 +1,36 @@
+# Second combat pool run (#38, concluded change from #39): fight
+# execution, not encounter or reward shape, was the binding constraint —
+# under the original placement the enemy is visible for only 3-13% of
+# decisions and the policy fires mostly blind. Training episodes
+# therefore start closer (100-350 units) and no longer require line of
+# sight to be broken, so most decisions are fighting; evaluation stays
+# on the original fixed tasks (200-600, LOS broken). Sparse reward is
+# kept, to attribute any change to placement alone.
+#   uv run python -m deepquake.train_combat configs/combat_pool2.toml
+name = "combat_pool2"
+opponents = [
+  { map = "e1m1", monster = "monster_army" },
+  { map = "e1m4", monster = "monster_ogre" },
+]
+reward = "sparse"
+seed = 0
+envs = 16
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+min_distance = 100.0
+max_distance = 350.0
+los_broken_required = false
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

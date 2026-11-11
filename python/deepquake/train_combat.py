@@ -41,6 +41,9 @@ def make_env(config: dict, seed: int, index: int) -> combat.CombatEnv:
         reward=config.get("reward", "damage"),
         monster=monster,
         timeout_steps=int(config.get("timeout_steps", 300)),
+        min_distance=float(config.get("min_distance", 200.0)),
+        max_distance=float(config.get("max_distance", 600.0)),
+        los_broken_required=bool(config.get("los_broken_required", True)),
     )
 
 
