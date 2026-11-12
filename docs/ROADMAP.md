@@ -179,6 +179,34 @@ alone does not explain the gap either. #38 stays open and blocked;
 three measured attempts now bound the problem to optimisation and
 task structure rather than any single input the policy is missing.
 
+Optimisation and task-structure grid (2026-11-11/12, #38: eight
+grunt-only 10M-decision runs, each a single lever, all evaluated on
+the same fixed 200 Grunt tasks where random scores 13.5% and the
+scripted shooter 23.0%):
+
+| Run | Lever | Eval win | Own-placement train win |
+| --- | --- | --- | --- |
+| `combat_grunt_only` | none (old placement) | 11.5% | 16.9% |
+| `combat_grunt_entlow` | entropy_coef 0.001 | 12.5% | 15.9% |
+| `combat_grunt_lrhigh` | lr 1e-3 | 17.0% | 15.5% |
+| `combat_grunt_ep8` | epochs 8 | 9.0% | 15.2% |
+| `combat_grunt_fightstart` | close in-sight starts | 20.5% | 61.3% |
+| `combat_grunt_fightstart_entlow` | + entropy_coef 0.001 | 9.0% | 55.6% |
+| `combat_grunt_fightstart_damage` | + dense damage reward | 15.0% | 57.9% |
+| `combat_grunt_mixed` | 100–600 mixed band | 12.0% | ~40% |
+
+The fight-start placement trains the fight itself well (61–65% windows
+against random's 39% and the shooter's 73% on that placement) — the
+learning problem on a fixed distribution is solved. What no run does
+is transfer to the fixed evaluation tasks, which all begin far away
+with line of sight broken: the committed variant times out on 59.5%
+of them (it never learned to search), and every variant lands at or
+below the old-layout like-for-like 18.5%. The remaining levers —
+reverting the #40 action heads, a placement curriculum that anneals
+outward, observation enrichment, or a different algorithm family —
+are design decisions; #38 is parked for the maintainer with this
+table.
+
 ## M4 — First monster brain
 
 - [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
