@@ -1,0 +1,36 @@
+# Completes the placement x reward grid on the grunt-only task (#38):
+# the fight-start placement with dense damage reward. #39's "damage
+# approx spare" conclusion (16.0% vs 18.5%) was measured under the
+# original far LOS-broken starts, where damage events are rare — under
+# fight-start starts (100-350, sight allowed, 58% begin visible) damage
+# is dense and immediate, which is the credit-assignment signal sparse
+# terminal +-1 lacks. Single change from combat_grunt_fightstart:
+# reward sparse -> damage. Everything else identical; evaluation stays
+# on the unchanged 200 fixed Grunt tasks. Parity bar: shooter 23.0%,
+# random 13.5%; fightstart+sparse scored 20.5%.
+#   uv run python -m deepquake.train_combat configs/combat_grunt_fightstart_damage.toml
+name = "combat_grunt_fightstart_damage"
+map = "e1m1"
+monster = "monster_army"
+reward = "damage"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+min_distance = 100.0
+max_distance = 350.0
+los_broken_required = false
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
