@@ -131,12 +131,31 @@ reason to re-roll it: the kind channel is in place before any monster is
 trained, which is what #26 required. Whether a longer or re-tuned run
 recovers the old scores is future work, not part of #26.
 
+Combat training, first attempt (2026-11-11, #38, still open:
+`configs/combat_pool.toml`, sparse reward and 600-decision timeout from
+#32, the e1m1 Grunt and e1m4 Ogre as opponents, 10,000,000 decisions at
+about 5,400 steps/s after extending the first 5M run). `eval_combat`,
+200 fixed tasks per opponent:
+
+| Policy | Grunt, e1m1 (trained) | Ogre, e1m4 (trained) | Knight, e1m4 (held-out type) | Ogre, e1m5 (held-out map) |
+| --- | --- | --- | --- | --- |
+| Random actions | 15.5% | 0.0% | 3.0% | 2.5% |
+| Scripted shooter | 25.0% | 9.5% | 9.0% | 22.5% |
+| Trained | 18.5% | 0.0% | 5.0% | 5.0% |
+
+The trained policy beats random on the Grunt but not the scripted
+shooter, and wins nothing against the trained Ogre, so #38's bar (beat
+both baselines on the trained opponents) is **not met** and the issue
+stays open; the numbers stand as measured rather than re-rolled. The
+working branch is `issue-38-combat-training`.
+
 ## M4 — First monster brain
 
 - [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)
 - [x] Decide how the hook treats maps that ship their own game code (#27)
 - [x] Brain hook: policy replaces QuakeC decisions for one monster type (Grunt) (#31)
 - [x] Research the combat task (episode, reward, termination, opponent pool); the training issue follows from it (#32)
+- [ ] Train the player agent for combat (#38)
 - [x] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22) (#33)
 - [x] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22) (#34)
 - [ ] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert) (#35)

@@ -1,0 +1,33 @@
+# Train the player agent for combat (#38), from the #32 decisions:
+# sparse terminal reward, 600-decision timeout, graph placement, and a
+# pool of stock opponents — a Grunt-only policy won 1% against held-out
+# Ogres in #32, so one opponent type is not enough.
+#   uv run python -m deepquake.train_combat configs/combat_pool.toml
+#
+# Workers take the opponents in turn: the e1m1 Grunt and the e1m4 Ogre.
+# Held out for evaluation only: the Knight on e1m4 (type never trained)
+# and the Ogre on e1m5 (map never trained).
+name = "combat_pool"
+opponents = [
+  { map = "e1m1", monster = "monster_army" },
+  { map = "e1m4", monster = "monster_ogre" },
+]
+reward = "sparse"
+seed = 0
+envs = 16
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
