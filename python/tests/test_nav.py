@@ -117,3 +117,34 @@ def test_set_task_gives_up_on_a_never_free_start(monkeypatch):
 
     with pytest.raises(RuntimeError, match="blocked on a fresh map"):
         env.set_task(0, 1, 0.0)
+
+
+def test_reachability_cache_matches_brute_force():
+    """The incremental cache returns exactly the full-recompute answers (#29).
+
+    Adding an edge must invalidate precisely the sources whose reachability
+    can change — those that already reached the edge's tail.
+    """
+    rng = np.random.default_rng(29)
+    for _trial in range(20):
+        n = int(rng.integers(2, 40))
+        reach = nav._Reachability(n)
+        for _edge in range(int(rng.integers(0, 4 * n))):
+            a, b = (int(v) for v in rng.integers(0, n, 2))
+            reach.add(a, b)
+            for s in range(n):  # brute force: from-scratch BFS over the adjacency
+                seen = {s}
+                queue = [s]
+                while queue:
+                    queue = [nxt for x in queue for nxt in reach.adjacency[x] if nxt not in seen]
+                    seen.update(queue)
+                for t in range(n):
+                    assert reach.reaches(s, t) == (t in seen), (s, t)
+
+
+def test_reachability_started_from_known_edges():
+    """Edges given at construction count, as verify_links passes `known`."""
+    reach = nav._Reachability(4, {(0, 1), (1, 2)})
+    assert reach.reaches(0, 2) and not reach.reaches(2, 0)
+    reach.add(2, 3)
+    assert reach.reaches(0, 3) and not reach.reaches(3, 0)

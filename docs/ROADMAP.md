@@ -103,7 +103,11 @@ The trained policy beats bee-line on every one of the eight held-out maps
 about 3 points: the first evidence that the model reads geometry, not the
 map. Two bugs found on the way, both fixed: some start points are blocked
 by seeded monster wander (#30), and six maps' walk graphs take over an hour
-to build (#29, still open).
+to build (#29; fixed 2026-11-12 — every `verify_links` link cleared the
+whole per-source BFS cache, so corridor-heavy maps re-ran full BFS in
+Python for hours; invalidating only the sources that reach the new edge's
+tail is exact and builds all six in 31–1,626 s with byte-identical
+graphs on the maps that already built).
 
 Ray kinds in the observation (2026-11-11, #26: `configs/nav_maps2.toml`,
 same maps, curriculum, PPO settings and 10,000,000 decisions as `nav_maps`;

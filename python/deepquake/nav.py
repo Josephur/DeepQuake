@@ -47,7 +47,8 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -428,6 +429,41 @@ def _push_walk(target: np.ndarray, ticks: int) -> bool:
     return _probe_walk(target)
 
 
+class _Reachability:
+    """Which node reaches which through the directed edges known so far.
+
+    BFS results are cached per source. Adding the edge ``a -> b`` can only
+    create paths that use it, so it invalidates exactly the cached sources
+    that already reached ``a`` (a source's cache always contains itself).
+    Clearing the whole cache on every edge instead made corridor-heavy maps,
+    whose seam passes query many distinct sources, spend hours re-running
+    BFS in Python (#29); the incremental rule keeps every answer identical.
+    """
+
+    def __init__(self, n: int, edges: Iterable[tuple[int, int]] = ()):
+        self.adjacency: list[set[int]] = [set() for _ in range(n)]
+        for a, b in edges:
+            self.adjacency[a].add(b)
+        self._cache: dict[int, set[int]] = {}
+
+    def reaches(self, a: int, b: int) -> bool:
+        if a not in self._cache:
+            seen = {a}
+            queue = deque([a])
+            while queue:
+                for nxt in self.adjacency[queue.popleft()]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        queue.append(nxt)
+            self._cache[a] = seen
+        return b in self._cache[a]
+
+    def add(self, a: int, b: int) -> None:
+        self.adjacency[a].add(b)
+        for s in [s for s, seen in self._cache.items() if a in seen]:
+            del self._cache[s]
+
+
 def verify_links(
     points: np.ndarray, reload_map: Callable[[], None], known: set[tuple[int, int]] = frozenset()
 ) -> set[tuple[int, int]]:
@@ -456,25 +492,14 @@ def verify_links(
     # worth running exactly for ordered pairs with no route yet — gating on
     # parts (weak connectivity) is not enough: a pair can be weakly joined
     # through a one-way drop and still need, say, the lift to be walkable.
-    adjacency: list[set[int]] = [set() for _ in range(len(points))]
-    for a, b in known:
-        adjacency[a].add(b)
-    reachable_from: dict[int, set[int]] = {}
+    reach = _Reachability(len(points), known)
 
     def reaches(a: int, b: int) -> bool:
-        if a not in reachable_from:
-            seen = {a}
-            frontier = [a]
-            while frontier:
-                frontier = [nxt for x in frontier for nxt in adjacency[x] if nxt not in seen]
-                seen.update(frontier)
-            reachable_from[a] = seen
-        return b in reachable_from[a]
+        return reach.reaches(a, b)
 
     def link(a: int, b: int) -> None:
         links.add((a, b))
-        adjacency[a].add(b)
-        reachable_from.clear()
+        reach.add(a, b)
 
     def yaw_between(a: int, b: int) -> float:
         return float(
