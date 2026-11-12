@@ -1,0 +1,53 @@
+# The monster-side training run (#35): a Grunt policy through the brain
+# hook against a pool of player opponents, at every skill level, with
+# style conditioning as inputs. Maps rotate round-robin over workers
+# (the #19 machinery); held-out maps follow #19's rule and are never
+# trained. The player pool: the scripted shooter, a random player, and
+# #38's trained player policy at parity level (the maintainer's option E
+# — a stronger, less predictable sparring partner than the shooter).
+# Skills are sampled per episode and feed both the engine handicaps
+# (#34, via load_map) and the observation (#33); styles are sampled per
+# episode as observation inputs (their reward semantics are a known
+# open design question — see the #35 comments). Sparse terminal reward
+# per #32's measurement. Placement: player starts 200-600 units from
+# the nominated Grunt with line of sight broken (the #32 task with
+# roles inverted).
+#   uv run python -m deepquake.train_monster configs/grunt_pool.toml
+name = "grunt_pool"
+# Only four id1 maps stock monster_army (the Grunt): e1m1, e2m1, e3m1,
+# e4m1 (measured; other maps carry other monster types). Three train,
+# e3m1 is held out — a full episode map kept out of training, measured
+# as its own group.
+maps = ["e1m1", "e2m1", "e4m1"]
+held_out = ["e3m1"]
+envs = 6
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "sparse"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

@@ -232,8 +232,39 @@ parked as `blocked` + `needs-human`.
 - [ ] Train the player agent for combat (#38)
 - [x] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22) (#33)
 - [x] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22) (#34)
-- [ ] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert) (#35)
+- [x] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert) (#35)
 - [ ] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level (#36)
+
+Monster-side training (2026-11-12, #35: `configs/grunt_pool.toml`, the
+roles inverted — the policy drives the nominated Grunt through the brain
+hook, one held discrete decision per 6-tick block, while the
+environment drives the player opponent; `MonsterEnv` keeps the combat
+environment's contract so PPO runs unmodified). Only four id1 maps stock
+`monster_army` (measured): e1m1, e2m1, e4m1 train, e3m1 held out.
+Opponents rotate per worker: the scripted shooter, a random player, and
+#38's trained player checkpoint at parity level (the option-E decision
+there). Skills 0–3 and four style vectors are sampled per episode into
+the engine handicaps and the observation. 10,000,070 decisions, sparse
+terminal reward. Evaluation (`eval_monster`): fixed tasks per map and
+skill, the same player opponent for both brains — win rate is the
+player's death rate:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps, stock Grunt | 41.3% | 49.3% | 62.7% | 76.7% |
+| Training maps, trained Grunt | 43.3% | 58.7% | **67.3%** | 70.0% |
+| Held-out e3m1, stock Grunt | 58.0% | 80.0% | 78.0% | 78.0% |
+| Held-out e3m1, trained Grunt | 58.0% | 82.0% | **82.0%** | 74.0% |
+
+The trained Grunt beats the stock QuakeC Grunt at skill 2 (the #35
+Done-when bar) on both groups, and at skill 1; at skill 3 the stock
+nightmare brain, unhandicapped and refiring near-instantly, stays
+ahead. Per map at skill 2: e1m1 52→66%, e2m1 66→68%, e4m1 70→68%,
+held-out e3m1 78→82% — differences of 2–4 points on 150 tasks are
+about 1 standard error, so the win is a consistent direction, not a
+proven margin. Determinism is hash-checked per episode (test in
+`test_monster.py`). #36 extends the harness (time-to-first-damage
+metrics, the stock-vs-stock sanity row, the M4 handoff table).
 
 ## M5 — Play against it
 

@@ -178,6 +178,65 @@ def _stage_placement(
     return placement
 
 
+def visible_from(state: sim.PlayerState, enemy: sim.Entity, distances) -> bool:
+    """Whether the enemy is visible, read off a ray fan already cast."""
+    dx = enemy.origin[0] - state.origin[0]
+    dy = enemy.origin[1] - state.origin[1]
+    distance = math.hypot(dx, dy)
+    if distance > SIGHT_DISTANCE:
+        return False
+    bearing = math.degrees(math.atan2(dy, dx)) % 360.0
+    view = state.view_angles[1] % 360.0
+    column = int(round(((bearing - view) % 360.0) / (360.0 / nav.RAY_YAWS))) % nav.RAY_YAWS
+    return float(distances[0, column]) * SIGHT_DISTANCE >= distance - 48.0
+
+
+def player_observation(
+    state: sim.PlayerState,
+    enemy: sim.Entity | None,
+    visible: bool,
+    distances,
+    kinds,
+    steps: int,
+    timeout_steps: int,
+) -> np.ndarray:
+    """The player's 108-dim observation (#32): rays, own state, enemy, clock.
+
+    ``enemy`` is the monster this player fights; its channels are filled
+    only when ``visible`` says line of sight exists. Used by
+    :class:`CombatEnv` and by the monster-side environment's player
+    opponents (#35), so both sides read the same inputs the same way.
+    """
+    obs = np.zeros(OBS_DIM, dtype=np.float32)
+    n_rays = len(nav.RAY_PITCHES) * nav.RAY_YAWS
+    obs[:n_rays] = distances.ravel()
+    obs[n_rays : 2 * n_rays] = kinds.ravel() / 6.0
+
+    base = 2 * n_rays
+    yaw = math.radians(state.view_angles[1])
+    cos, sin = math.cos(yaw), math.sin(yaw)
+    vx, vy, vz = state.velocity
+    obs[base + 0] = (vx * cos + vy * sin) / 400.0
+    obs[base + 1] = (-vx * sin + vy * cos) / 400.0
+    obs[base + 2] = vz / 400.0
+    obs[base + 3] = float(state.on_ground)
+
+    if visible:
+        dx = enemy.origin[0] - state.origin[0]
+        dy = enemy.origin[1] - state.origin[1]
+        distance = math.hypot(dx, dy)
+        scale = 1.0 / max(distance, 1e-6)
+        obs[base + 4] = (dx * cos + dy * sin) * scale
+        obs[base + 5] = (-dx * sin + dy * cos) * scale
+        obs[base + 6] = np.clip((enemy.origin[2] - state.origin[2]) / 256.0, -1.0, 1.0)
+        obs[base + 7] = min(distance / 1024.0, 2.0)
+        obs[base + 8] = 1.0
+        obs[base + 10] = min(enemy.health / 100.0, 1.0)
+    obs[base + 9] = min(max(state.health, 0.0) / 100.0, 1.0)
+    obs[base + 11] = 1.0 - steps / timeout_steps
+    return obs
+
+
 class CombatEnv:
     """One player against one stock monster, fresh map load per episode."""
 
@@ -233,16 +292,7 @@ class CombatEnv:
         return [e for e in sim.entities() if e.classname == self.monster]
 
     def _visible_from(self, state: sim.PlayerState, enemy: sim.Entity, distances) -> bool:
-        """Whether the enemy is visible, read off a ray fan already cast."""
-        dx = enemy.origin[0] - state.origin[0]
-        dy = enemy.origin[1] - state.origin[1]
-        distance = math.hypot(dx, dy)
-        if distance > SIGHT_DISTANCE:
-            return False
-        bearing = math.degrees(math.atan2(dy, dx)) % 360.0
-        view = state.view_angles[1] % 360.0
-        column = int(round(((bearing - view) % 360.0) / (360.0 / nav.RAY_YAWS))) % nav.RAY_YAWS
-        return float(distances[0, column]) * SIGHT_DISTANCE >= distance - 48.0
+        return visible_from(state, enemy, distances)
 
     def _line_of_sight(self, enemy: sim.Entity) -> bool:
         """Whether the enemy is visible from the player's current eye."""
@@ -380,36 +430,12 @@ class CombatEnv:
         return nav.StepResult(self._observe(state), float(reward), bool(done), bool(won))
 
     def _observe(self, state: sim.PlayerState) -> np.ndarray:
-        obs = np.zeros(OBS_DIM, dtype=np.float32)
-        n_rays = len(nav.RAY_PITCHES) * nav.RAY_YAWS
         distances, kinds = sim.ray_fan(nav.RAY_PITCHES, nav.RAY_YAWS, nav.RAY_DISTANCE)
-        obs[:n_rays] = distances.ravel()
-        obs[n_rays : 2 * n_rays] = kinds.ravel() / 6.0
-
-        base = 2 * n_rays
-        yaw = math.radians(state.view_angles[1])
-        cos, sin = math.cos(yaw), math.sin(yaw)
-        vx, vy, vz = state.velocity
-        obs[base + 0] = (vx * cos + vy * sin) / 400.0
-        obs[base + 1] = (-vx * sin + vy * cos) / 400.0
-        obs[base + 2] = vz / 400.0
-        obs[base + 3] = float(state.on_ground)
-
         enemy = self._enemy()
-        if enemy is not None and enemy.health > 0 and self._visible_from(state, enemy, distances):
-            dx = enemy.origin[0] - state.origin[0]
-            dy = enemy.origin[1] - state.origin[1]
-            distance = math.hypot(dx, dy)
-            scale = 1.0 / max(distance, 1e-6)
-            obs[base + 4] = (dx * cos + dy * sin) * scale
-            obs[base + 5] = (-dx * sin + dy * cos) * scale
-            obs[base + 6] = np.clip((enemy.origin[2] - state.origin[2]) / 256.0, -1.0, 1.0)
-            obs[base + 7] = min(distance / 1024.0, 2.0)
-            obs[base + 8] = 1.0
-            obs[base + 10] = min(enemy.health / 100.0, 1.0)
-        obs[base + 9] = min(max(state.health, 0.0) / 100.0, 1.0)
-        obs[base + 11] = 1.0 - self.steps / self.timeout_steps
-        return obs
+        visible = enemy is not None and enemy.health > 0 and visible_from(state, enemy, distances)
+        return player_observation(
+            state, enemy, visible, distances, kinds, self.steps, self.timeout_steps
+        )
 
 
 # ---- baseline and evaluation helpers on the same fixed tasks ----

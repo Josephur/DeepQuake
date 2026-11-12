@@ -174,3 +174,111 @@ def test_monster_observation_on_generated_map():
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
     assert out["saw"] == 1.0
     assert out["hidden"] == 0.0
+
+
+def test_monster_env_validation_and_tasks():
+    from deepquake import monster_env
+
+    with pytest.raises(ValueError, match="reward"):
+        monster_env.MonsterEnv("e1m1", reward="nope")
+    with pytest.raises(ValueError, match="brain"):
+        monster_env.MonsterEnv("e1m1", brain="nope")
+    with pytest.raises(ValueError, match="skills"):
+        monster_env.MonsterEnv("e1m1", skills=(5,))
+    with pytest.raises(ValueError, match="opponent kind"):
+        monster_env.MonsterEnv("e1m1", opponent=monster_env.PlayerOpponent("nope"))
+    with pytest.raises(ValueError, match="checkpoint"):
+        monster_env.PlayerOpponent("trained").build(0)
+
+    env = monster_env.MonsterEnv.__new__(monster_env.MonsterEnv)
+    env.skills = (0, 1, 2, 3)
+    first = monster_env.make_tasks(env, 5, seed=7)
+    second = monster_env.make_tasks(env, 5, seed=7)
+    assert first == second and len(first) == 5
+    assert all(task[3] in (0, 1, 2, 3) for task in first)
+
+
+MONSTER_EPISODE = """
+import json
+import numpy as np
+from deepquake import monster_env, sim
+
+sim.init()
+env = monster_env.MonsterEnv(
+    "e1m1", seed=3, opponent=monster_env.PlayerOpponent("shooter"), skills=(1, 2, 3)
+)
+tasks = monster_env.make_tasks(env, 2, 99)
+assert tasks[0][3] == tasks[0][3]
+obs = env.set_task(*tasks[0])
+shape = list(obs.shape)
+skill = env.skill
+rng = np.random.default_rng(0)
+ended = 0
+for _ in range(600):
+    result = env.step(np.array([rng.integers(n) for n in monster_env.MONSTER_ACTION_NVEC]))
+    if result.done:
+        ended = env.steps
+        break
+stock_env = monster_env.MonsterEnv(
+    "e1m1", seed=3, opponent=monster_env.PlayerOpponent("shooter"), brain="stock"
+)
+stock_obs = stock_env.set_task(*tasks[0])
+stock_shape = list(stock_obs.shape)
+for _ in range(600):
+    stock_result = stock_env.step(None)
+    if stock_result.done:
+        stock_steps = stock_env.steps
+        break
+print(json.dumps({
+    "shape": shape, "skill": skill, "ended": ended,
+    "success": bool(result.success), "stock_shape": stock_shape,
+    "stock_steps": stock_steps,
+}))
+"""
+
+
+@pytest.mark.gamedata
+def test_monster_env_episode():
+    require_gamedata()
+    out = run_in_subprocess(MONSTER_EPISODE, timeout=300)
+    assert out["shape"] == [monster.MONSTER_OBS_DIM]
+    assert out["skill"] in (1, 2, 3)
+    assert out["ended"] > 0  # a random Grunt dies to the shooter well inside the timeout
+    assert out["stock_shape"] == [monster.MONSTER_OBS_DIM]
+    assert out["stock_steps"] > 0
+
+
+MONSTER_DETERMINISM = """
+import json
+import numpy as np
+from deepquake import monster_env, sim
+
+sim.init()
+results = []
+for _run in range(2):
+    env = monster_env.MonsterEnv(
+        "e1m1", seed=3, opponent=monster_env.PlayerOpponent("shooter"), skills=(2,)
+    )
+    obs = env.set_task(*(monster_env.make_tasks(env, 1, 55)[0]))
+    rng = np.random.default_rng(5)
+    first = None
+    for _ in range(60):
+        action = np.array([rng.integers(n) for n in monster_env.MONSTER_ACTION_NVEC])
+        result = env.step(action)
+        if result.done:
+            break
+    results.append({
+        "steps": env.steps,
+        "player_health": sim.player().health,
+        "hash": sim.state_hash(),
+    })
+print(json.dumps(results))
+"""
+
+
+@pytest.mark.gamedata
+def test_monster_env_deterministic():
+    """Same seed and same actions: identical episode, hash-verified (#36)."""
+    require_gamedata()
+    out = run_in_subprocess(MONSTER_DETERMINISM, timeout=300)
+    assert out[0] == out[1]
