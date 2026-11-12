@@ -1,0 +1,36 @@
+# Task restructure (#38, next maintainer choice after PPO tuning was
+# measured insufficient): episodes begin at the fight. Single opponent,
+# the #39-concluded placement from combat_pool2 (start 100-350 units,
+# line of sight not required to be broken) applied to the grunt-only
+# task: pool2 reached only 16.0% with the pool, and the enemy was still
+# visible for only a fraction of decisions under the original
+# placement. Sparse reward and all PPO settings stay at the
+# combat_grunt_only values; evaluation stays on the unchanged fixed
+# 200 Grunt tasks (200-600, LOS broken). Parity bar: shooter 23.0%,
+# random 13.5%.
+#   uv run python -m deepquake.train_combat configs/combat_grunt_fightstart.toml
+name = "combat_grunt_fightstart"
+map = "e1m1"
+monster = "monster_army"
+reward = "sparse"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+min_distance = 100.0
+max_distance = 350.0
+los_broken_required = false
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
