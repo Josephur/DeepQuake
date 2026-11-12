@@ -1,0 +1,35 @@
+# Mixed-band task structure (#38): one placement band 100-600 units
+# with sight allowed, so episodes range from close in-sight fights
+# (like combat_grunt_fightstart, which trains to 61-65% win on its own
+# placement but transfers weakly: 20.5% on the far LOS-broken eval
+# tasks, which all begin with an approach) to far starts like the fixed
+# eval distribution. Trains both phases in one distribution; sparse
+# reward, everything else identical to combat_grunt_fightstart.
+# Evaluation stays on the unchanged 200 fixed Grunt tasks.
+# Parity bar: shooter 23.0%, random 13.5%.
+#   uv run python -m deepquake.train_combat configs/combat_grunt_mixed.toml
+name = "combat_grunt_mixed"
+map = "e1m1"
+monster = "monster_army"
+reward = "sparse"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+min_distance = 100.0
+max_distance = 600.0
+los_broken_required = false
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

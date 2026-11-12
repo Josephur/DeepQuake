@@ -29,8 +29,12 @@ slice                 size   meaning
 ``[107]``             1      decisions remaining, / :data:`timeout_steps`
 ====================  =====  ==============================================
 
-Action (5 integers, :data:`ACTION_NVEC`): the navigation heads (forward,
-strafe, turn, jump) plus fire {no, yes}. Reward is selected by name
+Action (6 integers, :data:`ACTION_NVEC`): the navigation heads (forward,
+strafe, turn with the finer :data:`TURN_DEGREES`, jump) plus fire
+{no, yes} and a pitch head that accumulates into the aim pitch
+(:data:`PITCH_DEGREES`, clamped to +-45 degrees). The finer turn steps
+and the pitch head came from #40: precise aim halved the scripted
+time-to-kill on the Grunt and doubled it on the Ogre. Reward is selected by name
 (:data:`REWARDS`): ``damage`` pays damage dealt minus taken (per 100)
 plus +1 for the kill and -1 for dying; ``survival`` adds a small
 per-decision bonus on top; ``sparse`` pays only the terminal +-1.
@@ -40,17 +44,138 @@ Timeout pays 0 and ends the episode.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from . import nav, sim
 
 OBS_DIM = 2 * len(nav.RAY_PITCHES) * nav.RAY_YAWS + 12
-ACTION_NVEC = (3, 3, 5, 2, 2)
+ACTION_NVEC = (3, 3, 7, 2, 2, 3)
+TURN_DEGREES = (-30.0, -15.0, -5.0, 0.0, 5.0, 15.0, 30.0)
+PITCH_DEGREES = (-10.0, 0.0, 10.0)
 REWARDS = ("damage", "survival", "sparse")
 
 FRAME_SKIP = nav.FRAME_SKIP
 SIGHT_DISTANCE = 768.0
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Where training episodes start, relative to the chosen enemy."""
+
+    min_distance: float
+    max_distance: float
+    los_broken_required: bool
+
+
+@dataclass(frozen=True)
+class CurriculumStage:
+    """One placement regime of a training curriculum (#38, option A).
+
+    Holds until ``until_step`` decisions (per environment — the trainer
+    divides the global schedule), then the next stage takes over; the last
+    stage holds forever. ``close_fraction`` is the share of episodes that
+    still start in the *first* stage's placement, keeping the dense
+    close-range fights (and their learning signal) alive while the band
+    widens, so the fighting skill is not forgotten while the approach
+    phase is learned.
+    """
+
+    until_step: int
+    placement: Placement
+    close_fraction: float = 0.0
+
+
+def validate_stages(stages: Sequence[CurriculumStage]) -> None:
+    """Reject schedules that could not run: empty, out of order, bad share."""
+    if not stages:
+        raise ValueError("a curriculum needs at least one stage")
+    for stage in stages:
+        if not 0.0 <= stage.close_fraction <= 1.0:
+            raise ValueError(f"close_fraction must be within [0, 1], got {stage.close_fraction}")
+        if stage.placement.min_distance >= stage.placement.max_distance:
+            raise ValueError("placement min_distance must be below max_distance")
+    for earlier, later in zip(stages, stages[1:], strict=False):
+        if later.until_step <= earlier.until_step:
+            raise ValueError(
+                f"curriculum until_step must strictly increase, "
+                f"{later.until_step} after {earlier.until_step}"
+            )
+
+
+def scale_stages(stages: Sequence[CurriculumStage], share: float) -> tuple[CurriculumStage, ...]:
+    """Convert a global-decision schedule into this environment's decisions.
+
+    Every worker runs exactly the same number of decisions per update, so
+    one environment's ``share`` of the global schedule is exact: a stage
+    boundary at 2,000,000 global decisions with 8 environments becomes
+    250,000 decisions in each.
+    """
+    return tuple(
+        replace(stage, until_step=max(1, round(stage.until_step * share))) for stage in stages
+    )
+
+
+def stages_from_config(raw: Sequence[dict]) -> list[CurriculumStage]:
+    """Build a curriculum from a config file's ``[[stages]]`` entries.
+
+    ``until_step`` counts *global* decisions (``total_steps`` space); the
+    trainer gives each environment its exact share (see :func:`scale_stages`).
+    """
+    known = {
+        "until_step",
+        "min_distance",
+        "max_distance",
+        "los_broken_required",
+        "close_fraction",
+    }
+    stages = []
+    for entry in raw:
+        unknown = set(entry) - known
+        if unknown:
+            raise ValueError(f"unknown curriculum stage settings: {sorted(unknown)}")
+        stages.append(
+            CurriculumStage(
+                until_step=int(entry["until_step"]),
+                placement=Placement(
+                    min_distance=float(entry["min_distance"]),
+                    max_distance=float(entry["max_distance"]),
+                    los_broken_required=bool(entry["los_broken_required"]),
+                ),
+                close_fraction=float(entry.get("close_fraction", 0.0)),
+            )
+        )
+    validate_stages(stages)
+    return stages
+
+
+def _stage_placement(
+    stages: Sequence[CurriculumStage], decisions: int, rng: np.random.Generator | None = None
+) -> Placement:
+    """The placement for an episode starting after ``decisions`` decisions.
+
+    The active stage is the first whose ``until_step`` has not been reached
+    (the last stage holds forever). With ``rng`` given, an active stage's
+    ``close_fraction`` share of episodes uses the first stage's placement
+    instead — one draw per episode, only when the stage asks for it, so
+    runs without a curriculum draw no extra randomness.
+    """
+    stage = stages[-1]
+    for candidate in stages:
+        if decisions < candidate.until_step:
+            stage = candidate
+            break
+    placement = stage.placement
+    if (  # one rng draw per episode, only in stages that ask for it
+        stage.close_fraction > 0.0
+        and stage is not stages[0]
+        and rng is not None
+        and rng.random() < stage.close_fraction
+    ):
+        placement = stages[0].placement
+    return placement
 
 
 class CombatEnv:
@@ -67,9 +192,16 @@ class CombatEnv:
         min_distance: float = 200.0,
         max_distance: float = 600.0,
         los_broken_required: bool = True,
+        stages: Sequence[CurriculumStage] | None = None,
+        curriculum_offset: int = 0,
     ):
         if reward not in REWARDS:
             raise ValueError(f"reward must be one of {REWARDS}, got {reward!r}")
+        if stages is not None:
+            validate_stages(stages)
+            min_distance = stages[0].placement.min_distance
+            max_distance = stages[0].placement.max_distance
+            los_broken_required = stages[0].placement.los_broken_required
         self.map_name = map_name
         self.reward_name = reward
         self.monster = monster
@@ -77,14 +209,18 @@ class CombatEnv:
         self.min_distance = min_distance
         self.max_distance = max_distance
         # Training placement only (#39): fixed tasks (set_task) always
-        # require line of sight broken, whatever this is set to.
+        # require line of sight broken, whatever this is set to. A
+        # curriculum overrides these per episode as it progresses (#38).
         self.los_broken_required = los_broken_required
+        self.stages = tuple(stages) if stages is not None else None
+        self._decisions = curriculum_offset  # decisions taken, for the curriculum
         self.rng = np.random.default_rng(seed)
         # The walk graph is a property of the map; building it needs the
         # passive-navigation setup, which NavEnv's constructor performs.
         # Combat episodes do their own fresh loads without god/notarget.
         self.points = nav.NavEnv(map_name, seed=seed).points
         self.yaw = 0.0
+        self.pitch = 0.0
         self.steps = 0
         self.enemy_index = -1
         self._enemy_cached: sim.Entity | None = None
@@ -144,6 +280,7 @@ class CombatEnv:
             self.enemy_index = enemy.index
             self._enemy_cached = enemy
             self.yaw = yaw
+            self.pitch = 0.0
             self.steps = 0
             state = sim.player()
             self._prev_player_health = state.health
@@ -152,6 +289,11 @@ class CombatEnv:
         raise RuntimeError("no line-of-sight-broken start for the fixed task")
 
     def reset(self) -> np.ndarray:
+        placement = (
+            _stage_placement(self.stages, self._decisions, self.rng)
+            if self.stages is not None
+            else Placement(self.min_distance, self.max_distance, self.los_broken_required)
+        )
         for _attempt in range(200):
             load_seed = int(self.rng.integers(2**31))
             enemies = self._fresh_load(load_seed)
@@ -163,8 +305,8 @@ class CombatEnv:
             )
             height = np.abs(self.points[:, 2] - enemy.origin[2])
             candidates = np.flatnonzero(
-                (distances >= self.min_distance)
-                & (distances <= self.max_distance)
+                (distances >= placement.min_distance)
+                & (distances <= placement.max_distance)
                 & (height < 48.0)
             )
             if not len(candidates):
@@ -175,11 +317,12 @@ class CombatEnv:
             if not sim.teleport(start, yaw):
                 continue
             sim.step(yaw=yaw, repeat=2)
-            if self.los_broken_required and self._line_of_sight(enemy):
+            if placement.los_broken_required and self._line_of_sight(enemy):
                 continue  # graph episodes start with line of sight broken
             self.enemy_index = enemy.index
             self._enemy_cached = enemy
             self.yaw = yaw
+            self.pitch = 0.0
             self.steps = 0
             state = sim.player()
             self._prev_player_health = state.health
@@ -199,11 +342,14 @@ class CombatEnv:
         return self._enemy_cached
 
     def step(self, action: np.ndarray) -> nav.StepResult:
-        forward, strafe, turn, jump, fire = (int(a) for a in action)
-        self.yaw = (self.yaw + nav.TURN_DEGREES[turn]) % 360.0
+        self._decisions += 1
+        forward, strafe, turn, jump, fire, pitch = (int(a) for a in action)
+        self.yaw = (self.yaw + TURN_DEGREES[turn]) % 360.0
+        self.pitch = float(np.clip(self.pitch + PITCH_DEGREES[pitch], -45.0, 45.0))
         sim.step(
             forward=(forward - 1) * nav.RUN_SPEED,
             side=(1 - strafe) * nav.RUN_SPEED,
+            pitch=self.pitch,
             yaw=self.yaw,
             buttons=sim.BUTTON_ATTACK if fire else 0,
             repeat=FRAME_SKIP,
@@ -326,16 +472,16 @@ def shooter_policy(obs: np.ndarray) -> np.ndarray:
     if obs[base + 8] > 0:
         angle = math.degrees(math.atan2(obs[base + 5], obs[base + 4]))
         if angle > 20:
-            turn = 4
+            turn = 6
         elif angle > 5:
-            turn = 3
+            turn = 5
         elif angle < -20:
             turn = 0
         elif angle < -5:
             turn = 1
         else:
-            turn = 2
-        return np.array([2, 1, turn, 0, 1])
+            turn = 3
+        return np.array([2, 1, turn, 0, 1, 1])
     if obs[0] < 0.1:  # the ray straight ahead ends at a wall: turn away
-        return np.array([2, 1, 4, 0, 0])
-    return np.array([2, 1, 2, 0, 0])
+        return np.array([2, 1, 6, 0, 0, 1])
+    return np.array([2, 1, 3, 0, 0, 1])

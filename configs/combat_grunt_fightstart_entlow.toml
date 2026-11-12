@@ -1,0 +1,37 @@
+# Final combination of the two measured lever families (#38): the
+# fight-start placement (task restructure) with a committed policy
+# (entropy_coef 0.001). Rationale, both measured: the diagnosed
+# mechanism is entropy-pinning (ceiling 6.63 with coef 0.01; every run
+# sits near it and trains flat), and entlow alone degenerated under the
+# original far LOS-broken starts where outcomes are sparse — while
+# fight-start starts give dense outcomes (random wins 39% of episodes
+# there, shooter 73%). Commit + dense signal is untested. Everything
+# else is identical to combat_grunt_fightstart; evaluation stays on the
+# unchanged 200 fixed Grunt tasks. Parity bar: shooter 23.0%,
+# random 13.5%; fightstart alone scored 20.5%.
+#   uv run python -m deepquake.train_combat configs/combat_grunt_fightstart_entlow.toml
+name = "combat_grunt_fightstart_entlow"
+map = "e1m1"
+monster = "monster_army"
+reward = "sparse"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+min_distance = 100.0
+max_distance = 350.0
+los_broken_required = false
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.001
+hidden = 256
+bptt = 32

@@ -1,0 +1,27 @@
+# Grunt-only reachability test (#38): can a single-opponent run reach
+# scripted parity at all, before pooling is blamed? Same task the
+# pool runs train (sparse reward, 200-600 units, line of sight broken,
+# 600-decision timeout) and the current action layout, one opponent.
+#   uv run python -m deepquake.train_combat configs/combat_grunt_only.toml
+name = "combat_grunt_only"
+map = "e1m1"
+monster = "monster_army"
+reward = "sparse"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

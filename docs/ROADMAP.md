@@ -165,6 +165,64 @@ next suspect named by #39 is the action representation itself (turn
 quantisation, no pitch aim), which is a design question rather than
 more training budget.
 
+Third attempt (2026-11-11, #38 after the #40 aim spike:
+`configs/combat_pool3.toml`, finer turn steps {-30,-15,-5,0,+5,+15,+30}
+and a pitch aim head in the action layout, same opponents, sparse
+reward and original placement, 10,000,000 decisions). Same fixed
+tasks; baselines use the same new action heads:
+
+| Policy | Grunt, e1m1 (trained) | Ogre, e1m4 (trained) | Knight, e1m4 (held-out type) | Ogre, e1m5 (held-out map) |
+| --- | --- | --- | --- | --- |
+| Random actions | 13.5% | 0.0% | 2.5% | 5.0% |
+| Scripted shooter | 23.0% | 9.5% | 9.0% | 22.5% |
+| Trained | 10.5% | 0.0% | 1.5% | 5.0% |
+
+Aim fidelity in the scripted policy was worth wins (#40), but the
+trained policy with the finer heads scored *worse*, so representation
+alone does not explain the gap either. #38 stays open and blocked;
+three measured attempts now bound the problem to optimisation and
+task structure rather than any single input the policy is missing.
+
+Optimisation and task-structure grid (2026-11-11/12, #38: eight
+grunt-only 10M-decision runs, each a single lever, all evaluated on
+the same fixed 200 Grunt tasks where random scores 13.5% and the
+scripted shooter 23.0%):
+
+| Run | Lever | Eval win | Own-placement train win |
+| --- | --- | --- | --- |
+| `combat_grunt_only` | none (old placement) | 11.5% | 16.9% |
+| `combat_grunt_entlow` | entropy_coef 0.001 | 12.5% | 15.9% |
+| `combat_grunt_lrhigh` | lr 1e-3 | 17.0% | 15.5% |
+| `combat_grunt_ep8` | epochs 8 | 9.0% | 15.2% |
+| `combat_grunt_fightstart` | close in-sight starts | 20.5% | 61.3% |
+| `combat_grunt_fightstart_entlow` | + entropy_coef 0.001 | 9.0% | 55.6% |
+| `combat_grunt_fightstart_damage` | + dense damage reward | 15.0% | 57.9% |
+| `combat_grunt_mixed` | 100–600 mixed band | 12.0% | ~40% |
+
+The fight-start placement trains the fight itself well (61–65% windows
+against random's 39% and the shooter's 73% on that placement) — the
+learning problem on a fixed distribution is solved. What no run does
+is transfer to the fixed evaluation tasks, which all begin far away
+with line of sight broken: the committed variant times out on 59.5%
+of them (it never learned to search), and every variant lands at or
+below the old-layout like-for-like 18.5%.
+
+Placement curriculum (2026-11-12, #38 after the maintainer chose to
+anneal the placement outward: `configs/combat_grunt_curriculum.toml`,
+close fights 0–2M → wide band 2–6M → the evaluation placement itself
+6–10M with 30% of episodes kept close so the fighting signal survives;
+the trainer divides the global schedule across environments exactly).
+Stage 3 trained at 22–32% and was still improving at the budget end,
+but the evaluation scored **19.0%** — below even pure fight-start's
+20.5%, which remains the best of nine measured variants (9.0–20.5%,
+shooter 23.0%, random 13.5%). No training-side lever has closed the
+last few points on the far, sight-broken tasks, where the trained
+policy sits at statistical near-parity (z ≈ −0.8 at n=200). The
+decision — iterate the schedule, change the action heads, change the
+evaluation's task definition, or accept parity and move to the
+monster-side training (#35/#36) — is with the maintainer; #38 is
+parked as `blocked` + `needs-human`.
+
 ## M4 — First monster brain
 
 - [x] Ray casts report what they hit (liquids, doors, sky), before any monster is trained (#26)

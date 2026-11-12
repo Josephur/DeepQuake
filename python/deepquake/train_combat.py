@@ -29,22 +29,32 @@ def opponent_list(config: dict) -> list[tuple[str, str]]:
     return [(config.get("map", "e1m1"), config.get("monster", "monster_army"))]
 
 
-def make_env(config: dict, seed: int, index: int) -> combat.CombatEnv:
+def make_env(config: dict, seed: int, index: int, decisions_so_far: int = 0) -> combat.CombatEnv:
     """Runs inside a worker process: start its simulator and build the environment."""
     from . import sim
 
     sim.init()
     map_name, monster = opponent_list(config)[index % len(opponent_list(config))]
-    return combat.CombatEnv(
-        map_name,
-        seed=seed * 1000 + index,
-        reward=config.get("reward", "damage"),
-        monster=monster,
-        timeout_steps=int(config.get("timeout_steps", 300)),
-        min_distance=float(config.get("min_distance", 200.0)),
-        max_distance=float(config.get("max_distance", 600.0)),
-        los_broken_required=bool(config.get("los_broken_required", True)),
-    )
+    envs = int(config["envs"])
+    common: dict = {
+        "reward": config.get("reward", "damage"),
+        "monster": monster,
+        "timeout_steps": int(config.get("timeout_steps", 300)),
+    }
+    if "stages" in config:
+        # A curriculum owns the placement; it starts where a resumed run
+        # left off, so extending a run does not replay early stages.
+        common["stages"] = combat.scale_stages(
+            combat.stages_from_config(config["stages"]), 1.0 / envs
+        )
+        common["curriculum_offset"] = round(decisions_so_far / envs)
+    else:
+        common.update(
+            min_distance=float(config.get("min_distance", 200.0)),
+            max_distance=float(config.get("max_distance", 600.0)),
+            los_broken_required=bool(config.get("los_broken_required", True)),
+        )
+    return combat.CombatEnv(map_name, seed=seed * 1000 + index, **common)
 
 
 def train(config: dict, *, resume: bool = False, max_updates: int | None = None) -> Path:
@@ -72,7 +82,7 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
         f"opponents: {opponents}  reward: {config.get('reward', 'damage')}",
         flush=True,
     )
-    with ProcVecEnv(partial(make_env, config, config["seed"]), config["envs"]) as env:
+    with ProcVecEnv(partial(make_env, config, config["seed"], start_steps), config["envs"]) as env:
         learner = ppo.PPO(env, model, ppo_config, device, seed=config["seed"] * 1000)
         learner.total_steps = start_steps
         if saved:

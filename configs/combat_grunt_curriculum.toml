@@ -1,0 +1,56 @@
+# Placement curriculum (#38, maintainer option A, 2026-11-12): train
+# where learning works and anneal outward to the evaluation placement.
+# Stage 1 is the proven fight-start regime (100-350, sight allowed —
+# trains to 61-65% win vs random's 39%); stage 2 widens the band to
+# 100-600; stage 3 is the evaluation placement itself (200-600, line of
+# sight broken). Later stages keep part of their episodes in stage 1's
+# close fights (close_fraction), so the fighting signal never
+# disappears while the approach phase is learned — the measured failure
+# of every previous variant was transfer to the far, sight-broken tasks
+# the fixed evaluation uses. until_step counts global decisions, so the
+# schedule is independent of env count. Evaluation stays on the
+# unchanged 200 fixed Grunt tasks; bar: beat shooter 23.0% and random
+# 13.5% (best previous: 20.5%).
+#   uv run python -m deepquake.train_combat configs/combat_grunt_curriculum.toml
+name = "combat_grunt_curriculum"
+map = "e1m1"
+monster = "monster_army"
+reward = "sparse"
+seed = 0
+envs = 8
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[[stages]]
+until_step = 2000000
+min_distance = 100.0
+max_distance = 350.0
+los_broken_required = false
+
+[[stages]]
+until_step = 6000000
+min_distance = 100.0
+max_distance = 600.0
+los_broken_required = false
+close_fraction = 0.5
+
+[[stages]]
+until_step = 10000000
+min_distance = 200.0
+max_distance = 600.0
+los_broken_required = true
+close_fraction = 0.3
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
