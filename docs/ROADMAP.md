@@ -201,11 +201,23 @@ learning problem on a fixed distribution is solved. What no run does
 is transfer to the fixed evaluation tasks, which all begin far away
 with line of sight broken: the committed variant times out on 59.5%
 of them (it never learned to search), and every variant lands at or
-below the old-layout like-for-like 18.5%. The remaining levers —
-reverting the #40 action heads, a placement curriculum that anneals
-outward, observation enrichment, or a different algorithm family —
-are design decisions; #38 is parked for the maintainer with this
-table.
+below the old-layout like-for-like 18.5%.
+
+Placement curriculum (2026-11-12, #38 after the maintainer chose to
+anneal the placement outward: `configs/combat_grunt_curriculum.toml`,
+close fights 0–2M → wide band 2–6M → the evaluation placement itself
+6–10M with 30% of episodes kept close so the fighting signal survives;
+the trainer divides the global schedule across environments exactly).
+Stage 3 trained at 22–32% and was still improving at the budget end,
+but the evaluation scored **19.0%** — below even pure fight-start's
+20.5%, which remains the best of nine measured variants (9.0–20.5%,
+shooter 23.0%, random 13.5%). No training-side lever has closed the
+last few points on the far, sight-broken tasks, where the trained
+policy sits at statistical near-parity (z ≈ −0.8 at n=200). The
+decision — iterate the schedule, change the action heads, change the
+evaluation's task definition, or accept parity and move to the
+monster-side training (#35/#36) — is with the maintainer; #38 is
+parked as `blocked` + `needs-human`.
 
 ## M4 — First monster brain
 
