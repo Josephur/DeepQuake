@@ -66,6 +66,7 @@ class CombatEnv:
         timeout_steps: int = 300,
         min_distance: float = 200.0,
         max_distance: float = 600.0,
+        los_broken_required: bool = True,
     ):
         if reward not in REWARDS:
             raise ValueError(f"reward must be one of {REWARDS}, got {reward!r}")
@@ -75,6 +76,9 @@ class CombatEnv:
         self.timeout_steps = timeout_steps
         self.min_distance = min_distance
         self.max_distance = max_distance
+        # Training placement only (#39): fixed tasks (set_task) always
+        # require line of sight broken, whatever this is set to.
+        self.los_broken_required = los_broken_required
         self.rng = np.random.default_rng(seed)
         # The walk graph is a property of the map; building it needs the
         # passive-navigation setup, which NavEnv's constructor performs.
@@ -171,7 +175,7 @@ class CombatEnv:
             if not sim.teleport(start, yaw):
                 continue
             sim.step(yaw=yaw, repeat=2)
-            if self._line_of_sight(enemy):
+            if self.los_broken_required and self._line_of_sight(enemy):
                 continue  # graph episodes start with line of sight broken
             self.enemy_index = enemy.index
             self._enemy_cached = enemy
