@@ -258,6 +258,8 @@ class MonsterEnv:
             sim.set_policy_hook(self.monster_index, self._hook_policy)
         self._prev_player_health = sim.player().health
         self._prev_monster_health = max(self._monster_entity().health, 0.0)
+        self._first_damage_dealt: int | None = None
+        self._first_damage_taken: int | None = None
         if self.brain == "policy":
             # Warm-up ticks: the monster's first think fires the hook and the
             # observation is built from that report; the player stands still.
@@ -349,6 +351,10 @@ class MonsterEnv:
         taken = max(0.0, self._prev_monster_health - monster_health)
         self._prev_player_health = player_health
         self._prev_monster_health = monster_health
+        if dealt > 0.0 and self._first_damage_dealt is None:
+            self._first_damage_dealt = self.steps  # the monster side first drew blood
+        if taken > 0.0 and self._first_damage_taken is None:
+            self._first_damage_taken = self.steps
 
         won = state.health <= 0.0  # any monster's kill counts: they are one team
         lost = entity is None or entity.health <= 0.0
@@ -384,6 +390,8 @@ def evaluate(env: MonsterEnv, policy, tasks) -> dict:
     """
     wins = losses = timeouts = 0
     lengths = []
+    win_lengths: list[int] = []
+    damage_times: list[int] = []
     for task in tasks:
         try:
             obs = env.set_task(*task)
@@ -401,14 +409,24 @@ def evaluate(env: MonsterEnv, policy, tasks) -> dict:
         lengths.append(env.steps)
         if result.success:
             wins += 1
+            win_lengths.append(env.steps)
         elif env._prev_monster_health <= 0.0:
             losses += 1
         else:
             timeouts += 1
+        if env._first_damage_dealt is not None:
+            damage_times.append(env._first_damage_dealt)
     total = max(len(tasks), 1)
+    # Times are in decisions (12 per second); means cover only the tasks
+    # where the event happened, and the companion *_rate says how often.
     return {
         "win_rate": wins / total,
         "loss_rate": losses / total,
         "timeout_rate": timeouts / total,
         "mean_decisions": float(np.mean(lengths)) if lengths else 0.0,
+        "damage_rate": len(damage_times) / total,
+        "mean_time_to_first_damage": (
+            float(np.mean(damage_times)) if damage_times else float("nan")
+        ),
+        "mean_time_to_kill": float(np.mean(win_lengths)) if win_lengths else float("nan"),
     }

@@ -103,8 +103,18 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=50, help="tasks per (map, skill) cell")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--jobs", type=int, default=4, help="maps evaluated in parallel")
+    parser.add_argument(
+        "--sanity",
+        action="store_true",
+        help="sanity run: stock Grunt vs the scripted shooter (the #32 stock "
+        "player stand-in; see the #36 comments for why both sides cannot "
+        "literally be stock), asserting the rates stay symmetric",
+    )
     args = parser.parse_args()
 
+    if args.sanity:
+        args.opponent = "shooter"
+        args.checkpoint = None
     if args.opponent == "trained" and not args.opponent_checkpoint.exists():
         raise SystemExit(f"{args.opponent_checkpoint} does not exist")
     opponent = monster_env.PlayerOpponent(
@@ -146,31 +156,57 @@ def main() -> None:
             for brain in brains:
                 rates = [maps[m][f"{brain}@s{skill}"]["win_rate"] for m in maps]
                 summary[group][f"{brain}@s{skill}"] = round(float(np.mean(rates)), 4)
+                damage = [maps[m][f"{brain}@s{skill}"]["mean_time_to_first_damage"] for m in maps]
+                summary[group][f"{brain}@s{skill}"] = {
+                    "win_rate": round(float(np.mean(rates)), 4),
+                    "mean_time_to_first_damage": round(float(np.nanmean(damage)), 1),
+                }
 
     print(
         f"opponent: {args.opponent}"
         + (f" ({args.opponent_checkpoint})" if args.opponent == "trained" else "")
         + f"  tasks per cell: {args.episodes}"
     )
-    print(f"{'group':<10} {'skill':<7} {'stock win':>10} {'trained win':>12}")
+    print(
+        f"{'group':<10} {'skill':<7} {'stock win':>10} {'trained win':>12}"
+        f" {'stock t/dmg':>12} {'trained t/dmg':>14} {'stock t/kill':>13} {'trained t/kill':>15}"
+    )
     for group, maps in results.items():
         for skill in SKILLS:
-            stock = float(np.mean([maps[m][f"stock@s{skill}"]["win_rate"] for m in maps]))
-            trained = (
-                float(np.mean([maps[m][f"policy@s{skill}"]["win_rate"] for m in maps]))
-                if args.checkpoint
-                else float("nan")
+            cells = {
+                brain: {
+                    field: float(np.nanmean([maps[m][f"{brain}@s{skill}"][field] for m in maps]))
+                    for field in ("win_rate", "mean_time_to_first_damage", "mean_time_to_kill")
+                }
+                for brain in brains
+            }
+            row = [f"{group:<10}", f"s{skill:<6}"]
+            row.append(f"{cells['stock']['win_rate']:>10.1%}")
+            row.append(
+                f"{cells['policy']['win_rate']:>12.1%}" if "policy" in cells else f"{'--':>12}"
             )
-            print(f"{group:<10} s{skill:<6} {stock:10.1%} {trained:12.1%}")
+            for field in ("mean_time_to_first_damage", "mean_time_to_kill"):
+                row.append(f"{cells['stock'][field]:>12.0f}")
+                row.append(
+                    f"{cells['policy'][field]:>14.0f}" if "policy" in cells else f"{'--':>14}"
+                )
+            print(" ".join(row))
 
     out = {
         "checkpoint": str(args.checkpoint) if args.checkpoint else None,
         "opponent": {"kind": args.opponent, "checkpoint": str(args.opponent_checkpoint)},
         "episodes": args.episodes,
         "seed": args.seed,
+        "sanity": args.sanity,
         "results": results,
         "summary": summary,
     }
+    if args.sanity:  # the three outcomes are counted from one event stream: they must fill 100%
+        for group, maps in results.items():
+            for map_name, cells in maps.items():
+                for key, rates in cells.items():
+                    total = rates["win_rate"] + rates["loss_rate"] + rates["timeout_rate"]
+                    assert abs(total - 1.0) < 1e-9, (group, map_name, key, total)
     if args.checkpoint:
         out_path = args.checkpoint.parent / "eval_monster.json"
         out_path.write_text(json.dumps(out, indent=2) + "\n")

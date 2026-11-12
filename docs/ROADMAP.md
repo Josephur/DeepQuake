@@ -233,7 +233,7 @@ parked as `blocked` + `needs-human`.
 - [x] Monster observation with fair senses only, and a skill input (Quake's `skill`, 0 to 3) next to the style input (design: #22) (#33)
 - [x] Engine handicaps scaled by skill: reaction delay and aim error, seeded, identical in simulator and client (#22) (#34)
 - [x] Train the Grunt against the pool at every skill level; style conditioning (aggressive, defensive, covert) (#35)
-- [ ] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level (#36)
+- [x] Evaluation against the stock QuakeC Grunt under identical conditions, at each skill level (#36; the both-side-stock sanity row became stock-vs-scripted-shooter — no stock player AI exists, see the M4 notes)
 
 Monster-side training (2026-11-12, #35: `configs/grunt_pool.toml`, the
 roles inverted — the policy drives the nominated Grunt through the brain
@@ -263,8 +263,27 @@ ahead. Per map at skill 2: e1m1 52→66%, e2m1 66→68%, e4m1 70→68%,
 held-out e3m1 78→82% — differences of 2–4 points on 150 tasks are
 about 1 standard error, so the win is a consistent direction, not a
 proven margin. Determinism is hash-checked per episode (test in
-`test_monster.py`). #36 extends the harness (time-to-first-damage
-metrics, the stock-vs-stock sanity row, the M4 handoff table).
+`test_monster.py`).
+
+The M4 handoff metrics (#36; decisions, 12 per second — means over the
+tasks where the event happened):
+
+| Metric, training maps | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Time to first damage, stock | 97 | 80 | 53 | 31 |
+| Time to first damage, trained | 87 | 78 | **44** | 29 |
+| Time to kill, stock (won tasks) | 278 | 252 | 203 | 171 |
+| Time to kill, trained (won tasks) | 303 | 276 | 212 | 163 |
+
+At skill 2 the trained Grunt engages sooner (first damage at 44
+decisions vs the stock brain's 53) and kills slightly more often but a
+little slower. The sanity row of the harness (`eval_monster --sanity`)
+runs the stock Grunt against the scripted shooter — the project's stock
+player stand-in since #32 — because a literal both-side-stock mirror
+does not exist: the player has no stock AI, the hook drives one
+monster, and allied Grunts never fight each other. Measured: 42–58%
+monster wins on training maps (57.3% at skill 2), first damage 27–81
+decisions, and the outcome rates are asserted to fill exactly 100%.
 
 ## M5 — Play against it
 
