@@ -42,12 +42,20 @@ slice                 size   meaning
 ``[114]``             1      1 while a last-seen position is remembered
 ``[115]``             1      skill / 3 (Quake's ``skill``, 0-3)
 ``[116:119]``         3      style: aggression, caution, stealth (0-1)
+``[119:121]``         2      monster type, one-hot in :data:`MONSTER_TYPES`
+                             order (0: Grunt, 1: Dog)
 ====================  =====  ==============================================
 
 One observer serves one monster for one episode: call
 :meth:`MonsterObserver.reset` when the monster (re)spawns. Building the
 vector is deterministic — the same sequence of hook reports always gives
 the same vectors.
+
+The type input is what lets one network serve every monster type (#48):
+the observation gives the shared trunk the body the policy is wearing, and
+the network's per-type output head is selected from the same one-hot. It is
+appended rather than prepended so a network trained on the 119-wide layout
+warm-starts by copying its input columns unchanged.
 """
 
 from __future__ import annotations
@@ -59,7 +67,12 @@ import numpy as np
 from . import sim
 
 N_RAYS = len(sim.HOOK_RAY_PITCHES) * sim.HOOK_RAY_YAWS
-MONSTER_OBS_DIM = 2 * N_RAYS + 23
+#: The shared network's type vocabulary, in index order. The client's
+#: ``<model>.onnx.monsters`` sidecar maps a classname to this index.
+MONSTER_TYPES = ("monster_army", "monster_dog")
+N_MONSTER_TYPES = len(MONSTER_TYPES)
+MONSTER_OBS_BASE_DIM = 2 * N_RAYS + 23
+MONSTER_OBS_DIM = MONSTER_OBS_BASE_DIM + N_MONSTER_TYPES
 MEMORY_SECONDS = 5.0
 
 
@@ -71,14 +84,18 @@ class MonsterObserver:
         *,
         skill: int = 1,
         style: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        monster_type: str = MONSTER_TYPES[0],
         memory_seconds: float = MEMORY_SECONDS,
     ):
         if skill not in (0, 1, 2, 3):
             raise ValueError(f"skill must be 0-3, got {skill!r}")
         if len(style) != 3 or any(not 0.0 <= value <= 1.0 for value in style):
             raise ValueError(f"style must be three values in [0, 1], got {style!r}")
+        if monster_type not in MONSTER_TYPES:
+            raise ValueError(f"monster type must be one of {MONSTER_TYPES}, got {monster_type!r}")
         self.skill = skill
         self.style = tuple(float(value) for value in style)
+        self.monster_type = monster_type
         self.memory_seconds = float(memory_seconds)
         self.reset()
 
@@ -123,6 +140,7 @@ class MonsterObserver:
 
         obs[base + 19] = self.skill / 3.0
         obs[base + 20 : base + 23] = self.style
+        obs[base + 23 + MONSTER_TYPES.index(self.monster_type)] = 1.0
         return obs
 
     @staticmethod

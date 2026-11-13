@@ -1,0 +1,53 @@
+# The roster run (#48): one shared policy for the Grunt and the Dog, warm
+# started from the Grunt's finished run. The trunk and the recurrent core
+# are shared; the monster type comes in as a one-hot appended to the
+# observation (deepquake.monster.MONSTER_TYPES), and each type has its own
+# policy head, so one ONNX model can drive a mixed level. The fine-tune is
+# combined (not Dog-only): both bodies train together, so the trunk does
+# not drift away from the Grunt while the Dog learns.
+#
+# Maps: every id1 map that stocks both classes — e1m1 (34 Grunts/8 Dogs),
+# e2m1, e4m1 — with e3m1 held out (35/9), the same split rule as
+# configs/grunt_pool.toml. Placement, opponents, skills, styles, reward
+# and PPO settings are unchanged from the Grunt run, so the difference
+# measured is the shared network, not a different task.
+#   uv run python -m deepquake.train_monster configs/roster_pool.toml
+name = "roster_pool"
+monsters = ["monster_army", "monster_dog"]
+# The Grunt's 10M-step checkpoint: its GRU, its policy head and its value
+# head are copied, the new type columns are zeroed, so the shared network
+# starts by playing exactly like the released Grunt model.
+init_from = "runs/grunt_pool/checkpoint.pt"
+maps = ["e1m1", "e2m1", "e4m1"]
+held_out = ["e3m1"]
+envs = 6
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "sparse"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

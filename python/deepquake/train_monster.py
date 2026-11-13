@@ -50,6 +50,63 @@ def map_list(config: dict) -> list[str]:
     return list(maps)
 
 
+def monster_list(config: dict) -> list[str]:
+    """The monster classes a run trains, in type order (#48).
+
+    ``monsters`` lists every body a shared model learns; ``monster`` (the
+    single-type runs of #35) pins one. A class outside
+    :data:`monster.MONSTER_TYPES` is a config mistake, not a runtime one, so
+    it fails here.
+    """
+    classes = config.get("monsters")
+    if classes is None:
+        classes = [config.get("monster", monster.MONSTER_TYPES[0])]
+    classes = list(classes)
+    unknown = [name for name in classes if name not in monster.MONSTER_TYPES]
+    if unknown:
+        raise ValueError(
+            f"unknown monster classes {unknown}; known types are {monster.MONSTER_TYPES}"
+        )
+    if not classes:
+        raise ValueError("monsters must name at least one monster class")
+    return classes
+
+
+def build_model(config: dict, ppo_config: ppo.PPOConfig, device) -> ppo.ActorCritic:
+    """The network of a run: shared type inputs, warm started if asked.
+
+    A run that lists more than one class, or any run at all once the shared
+    layout exists, builds :class:`ppo.ActorCritic` with one head per type.
+    ``init_from`` names a checkpoint to warm start from — the Grunt's
+    ``runs/grunt_pool/checkpoint.pt`` in the roster run — so the shared
+    network starts as the old brain and the fine-tune moves it.
+    """
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM,
+        monster_env.MONSTER_ACTION_NVEC,
+        ppo_config.hidden,
+        n_types=monster.N_MONSTER_TYPES,
+    ).to(device)
+    init_from = config.get("init_from")
+    if init_from:
+        source_path = Path(init_from)
+        if not source_path.is_absolute():
+            source_path = REPO_ROOT / source_path
+        if not source_path.exists():
+            raise SystemExit(
+                f"init_from {source_path} does not exist; warm starts need the "
+                f"source run's checkpoint.pt (omit init_from to train from scratch)"
+            )
+        source, _saved = ppo.load_model(source_path, device)
+        if source.obs_dim > monster.MONSTER_OBS_BASE_DIM:
+            raise SystemExit(
+                f"init_from {source_path} is a shared-type model (obs_dim "
+                f"{source.obs_dim}); warm start from a single-type checkpoint"
+            )
+        model.init_from(source)
+    return model
+
+
 def make_env(config: dict, seed: int, index: int) -> monster_env.MonsterEnv:
     """Runs inside a worker process: start its simulator and build the environment."""
     from . import sim
@@ -61,7 +118,7 @@ def make_env(config: dict, seed: int, index: int) -> monster_env.MonsterEnv:
     return monster_env.MonsterEnv(
         maps[index % len(maps)],
         seed=seed * 1000 + index,
-        monster=config.get("monster", "monster_army"),
+        monsters=monster_list(config),
         opponent=opponents[index % len(opponents)],
         timeout_steps=int(config.get("timeout_steps", 600)),
         min_distance=float(config.get("min_distance", 200.0)),
@@ -91,9 +148,7 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
         if overlap:
             raise ValueError(f"training maps and held-out maps overlap: {sorted(overlap)}")
 
-    model = ppo.ActorCritic(
-        monster.MONSTER_OBS_DIM, monster_env.MONSTER_ACTION_NVEC, ppo_config.hidden
-    ).to(device)
+    model = build_model(config, ppo_config, device)
     start_steps = 0
     saved = None
     if resume:
@@ -102,7 +157,8 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
 
     print(
         f"device: {device}  envs: {config['envs']}  run: {run_dir}\n"
-        f"maps: {maps}  opponents: {opponents}  skills: {config.get('skills', [2])}",
+        f"maps: {maps}  monsters: {monster_list(config)}  "
+        f"opponents: {opponents}  skills: {config.get('skills', [2])}",
         flush=True,
     )
     with ProcVecEnv(partial(make_env, config, config["seed"]), config["envs"]) as env:
@@ -150,6 +206,7 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
                         {
                             "total_steps": learner.total_steps,
                             "maps": maps,
+                            "monsters": monster_list(config),
                             "held_out": list(config.get("held_out", [])),
                             "opponents": [(o.kind, o.checkpoint) for o in opponents],
                             "skills": list(config.get("skills", [2])),

@@ -12,10 +12,16 @@ onnxruntime = pytest.importorskip("onnxruntime")
 export = pytest.importorskip("deepquake.export_onnx")
 
 
-def _trained_toy(seed: int, obs_dim: int = 8, nvec: tuple[int, ...] = (3, 4, 2), hidden: int = 16):
+def _trained_toy(
+    seed: int,
+    obs_dim: int = 8,
+    nvec: tuple[int, ...] = (3, 4, 2),
+    hidden: int = 16,
+    n_types: int | None = None,
+):
     """A small actor-critic with deterministic-but-not-trivial weights."""
     torch.manual_seed(seed)
-    model = ppo.ActorCritic(obs_dim, nvec, hidden)
+    model = ppo.ActorCritic(obs_dim, nvec, hidden, n_types=n_types)
     with torch.no_grad():
         for name, param in model.named_parameters():
             param.copy_(torch.linspace(-0.5, 0.5, param.numel()).reshape(param.shape))
@@ -84,6 +90,49 @@ def test_export_matches_head_order(tmp_path):
         # Trained (non-degenerate) weights: no head sits on the uniform
         # distribution, and the two heads differ from each other.
         assert not np.allclose(head_slice.numpy(), flat, atol=1e-3)
+
+
+def test_export_shared_model_writes_the_class_map(tmp_path):
+    """A two-type model exports the per-type heads and names its classes (#48)."""
+    from deepquake import monster, monster_env
+
+    model = _trained_toy(
+        seed=48,
+        obs_dim=monster.MONSTER_OBS_DIM,
+        nvec=monster_env.MONSTER_ACTION_NVEC,
+        n_types=monster.N_MONSTER_TYPES,
+    )
+    # The sidecar maps each class to its canonical type index, whatever order
+    # the run listed them in.
+    checkpoint = tmp_path / "shared.pt"
+    ppo.save_checkpoint(
+        checkpoint, model, None, {"total_steps": 5, "monsters": ["monster_dog", "monster_army"]}
+    )
+    out = tmp_path / "shared.onnx"
+    spec = export.export_onnx(checkpoint, out, samples=16)
+    assert spec["n_types"] == monster.N_MONSTER_TYPES
+    assert (tmp_path / "shared.onnx.monsters").read_text() == "monster_army 0\nmonster_dog 1\n"
+
+    # Parity with the type one-hot set: each row is one body, not a mixture.
+    session = onnxruntime.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+    rng = np.random.default_rng(3)
+    obs = rng.standard_normal((4, monster.MONSTER_OBS_DIM)).astype(np.float32)
+    obs[:, monster.MONSTER_OBS_BASE_DIM :] = 0.0
+    for row in range(4):
+        obs[row, monster.MONSTER_OBS_BASE_DIM + row % monster.N_MONSTER_TYPES] = 1.0
+    hidden = rng.standard_normal((4, model.hidden)).astype(np.float32)
+    with torch.no_grad():
+        probs, _value, _state = export._PolicyGraph(model)(
+            torch.as_tensor(obs), torch.as_tensor(hidden)
+        )
+    got, _got_value, _got_state = session.run(None, {"observation": obs, "hidden_in": hidden})
+    assert np.max(np.abs(got - probs.numpy())) < 1e-5
+
+    # A run that names fewer classes than the model has types is a mistake.
+    wrong = tmp_path / "wrong.pt"
+    ppo.save_checkpoint(wrong, model, None, {"monsters": ["monster_army"]})
+    with pytest.raises(ValueError, match="classes"):
+        export.export_onnx(wrong, tmp_path / "wrong.onnx", samples=2)
 
 
 CHECKPOINTS = [

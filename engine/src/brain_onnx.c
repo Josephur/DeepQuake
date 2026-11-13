@@ -16,6 +16,12 @@
  * has up to 35 Grunts, and one shared hidden state would smear their
  * episodes together. The number is capped by dq_max_monsters (0 = all).
  *
+ * A model is either a v1 single-type one (119 observation floats, the
+ * Grunt only) or a shared one (#48) whose input ends with a one-hot of
+ * the monster type; "<path>.monsters" names the classes and their type
+ * index, and each nominated monster carries its own index into the
+ * observation, so one session drives a mixed level.
+ *
  * The observation the model consumes is deepquake.monster's (#33): the
  * dq_build_observation function below constructs exactly that layout.
  *
@@ -35,8 +41,12 @@
 
 #include <onnxruntime_c_api.h>
 
-/* deepquake.monster.MONSTER_OBS_DIM and MEMORY_SECONDS. */
-#define DQ_MONSTER_OBS_DIM 119
+/* deepquake.monster.MONSTER_OBS_BASE_DIM, MEMORY_SECONDS and the type
+ * vocabulary width (#48). A v1 model (models-v1) is 119 wide and has no
+ * type input; a shared model appends one one-hot entry per type. */
+#define DQ_MONSTER_OBS_BASE_DIM 119
+#define DQ_MONSTER_MAX_TYPES 8
+#define DQ_MONSTER_OBS_MAX (DQ_MONSTER_OBS_BASE_DIM + DQ_MONSTER_MAX_TYPES)
 #define DQ_MONSTER_MEMORY_SECONDS 5.0f
 /* deepquake.monster_env.MONSTER_SPEED: commanded forward/side speed the
  * policy was trained with (the engine's monster physics cap what moves). */
@@ -60,6 +70,9 @@ typedef struct dq_model {
     char *name_out_probs, *name_out_value, *name_out_hidden;
     size_t hidden_dim;
     int obs_dim;
+    /* How many monster-type entries the observation ends with (#48): 0 for
+     * a v1 model, n_types for a shared one. */
+    int type_dim;
     /* The action layout (deepquake.monster_env.ACTION_NVEC) and the turn
      * grid (combat.TURN_DEGREES), from the ".nvec" sidecar; the Grunt's
      * layout is the default so a model without one still runs. */
@@ -82,6 +95,8 @@ typedef struct dq_monster_state {
     int last_seen_valid;
     float yaw;
     int skill;
+    /* Which entry of the model's type one-hot this monster is (#48). */
+    int type_index;
 } dq_monster_state;
 
 static dq_monster_state monster_states[DQ_BRAIN_MAX_MONSTERS];
@@ -240,14 +255,49 @@ static int load_model(dq_model *model)
     model->obs_dim = (int)shape[1];
     /* The client drives monster policies only (#35): a model with another
      * observation width is the wrong architecture - refuse it for stock
-     * play with a clear log line instead of feeding it misaligned input. */
-    if (model->obs_dim != DQ_MONSTER_OBS_DIM) {
+     * play with a clear log line instead of feeding it misaligned input.
+     * Two widths are legal: 119 (a v1 single-type model) and
+     * 119 + n_types (a shared model, #48). */
+    if (model->obs_dim == DQ_MONSTER_OBS_BASE_DIM) {
+        model->type_dim = 0;
+    } else if (model->obs_dim > DQ_MONSTER_OBS_BASE_DIM &&
+               model->obs_dim <= DQ_MONSTER_OBS_MAX) {
+        model->type_dim = model->obs_dim - DQ_MONSTER_OBS_BASE_DIM;
+    } else {
         Con_Printf("deepquake: refusing %s - observation width %d, the client "
-                   "expects %d (wrong architecture?)\n",
-                   model->path, model->obs_dim, DQ_MONSTER_OBS_DIM);
+                   "expects %d (a single-type model) or %d-%d (a shared model)\n",
+                   model->path, model->obs_dim, DQ_MONSTER_OBS_BASE_DIM,
+                   DQ_MONSTER_OBS_BASE_DIM + 1, DQ_MONSTER_OBS_MAX);
         return -1;
     }
     return 0;
+}
+
+/* A model only drives classes its observation can name: a v1 model (no
+ * type input) covers the single type 0, a shared model every index it has
+ * an entry for (#48). */
+static int classes_fit(dq_model *model)
+{
+    for (int c = 0; c < model->class_count; c++) {
+        int index = model->classes[c].type_index;
+        int ok = model->type_dim == 0 ? index == 0
+                                      : index >= 0 && index < model->type_dim;
+        if (!ok) {
+            Con_Printf("deepquake: refusing %s - class %s has type index %d "
+                       "but the model has %d type input(s)\n",
+                       model->path, model->classes[c].classname, index,
+                       model->type_dim);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void discard_model(dq_model *model)
+{
+    if (model->session)
+        ort()->ReleaseSession(model->session);
+    memset(model, 0, sizeof(*model));
 }
 
 /* Load every path in dq_model once. A failure is logged once and leaves
@@ -278,9 +328,9 @@ static void load_models(const char *list)
             model->classes[0].type_index = 0;
             model->class_count = 1;
         }
-        if (load_model(model)) {
+        if (load_model(model) || !classes_fit(model)) {
             Con_Printf("deepquake: %s did not load; its monsters stay stock\n", model->path);
-            memset(model, 0, sizeof(*model));
+            discard_model(model);
             continue;
         }
         Con_Printf("deepquake: loaded %s\n", model->path);
@@ -288,12 +338,16 @@ static void load_models(const char *list)
     }
 }
 
-static dq_model *model_for_class(const char *classname)
+/* The model driving a class, and which type entry of its observation that
+ * class is (unused by a v1 model). */
+static dq_model *model_for_class(const char *classname, int *type_index)
 {
     for (int m = 0; m < model_count; m++)
         for (int c = 0; c < models[m].class_count; c++)
-            if (strcmp(models[m].classes[c].classname, classname) == 0)
+            if (strcmp(models[m].classes[c].classname, classname) == 0) {
+                *type_index = models[m].classes[c].type_index;
                 return &models[m];
+            }
     return NULL;
 }
 
@@ -303,7 +357,7 @@ static void dq_build_observation(dq_monster_state *state,
                                  const dqsim_hook_observation *hook, float *out)
 {
     const int rays = DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS;
-    memset(out, 0, sizeof(float) * DQ_MONSTER_OBS_DIM);
+    memset(out, 0, sizeof(float) * DQ_MONSTER_OBS_MAX);
     for (int i = 0; i < rays; i++) {
         out[i] = hook->rays[i];
         out[rays + i] = hook->ray_kinds[i] / 6.0f;
@@ -379,6 +433,11 @@ static void dq_build_observation(dq_monster_state *state,
     out[at + 20] = 0.25f;
     out[at + 21] = 0.5f;
     out[at + 22] = 0.75f;
+    /* The body the policy is wearing (#48): a shared model ends its input
+     * with one one-hot entry per type, and its head is chosen from it. A
+     * v1 model (type_dim 0) has no such slice. */
+    if (state->model->type_dim > 0)
+        out[at + 23 + state->type_index] = 1.0f;
 }
 
 /* The client's policy: the brain-hook callback running this monster's
@@ -390,7 +449,7 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
     dq_model *model = state->model;
     const OrtApi *api = ort();
 
-    float obs[DQ_MONSTER_OBS_DIM];
+    float obs[DQ_MONSTER_OBS_MAX];
     dq_build_observation(state, hook, obs);
 
     int64_t shape[2] = {1, (int64_t)model->obs_dim};
@@ -515,7 +574,8 @@ static void nominate_pass(void)
         edict_t *ent = EDICT_NUM(i);
         if (ent->free)
             continue;
-        dq_model *model = model_for_class(PR_GetString(ent->v.classname));
+        int type_index = 0;
+        dq_model *model = model_for_class(PR_GetString(ent->v.classname), &type_index);
         if (!model)
             continue;
         if (dq_brain_hook_is_nominated(i))
@@ -525,6 +585,7 @@ static void nominate_pass(void)
             break;
         state->entity_index = i;
         state->model = model;
+        state->type_index = type_index;
         state->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
         /* The recurrent state starts at zero for every episode, like
          * training; the facing continues from the monster's own. */
@@ -538,8 +599,28 @@ static void nominate_pass(void)
     }
     if (driven != reported_driven) {
         reported_driven = driven;
-        Con_Printf("deepquake: %d monster(s) driven by the model%s\n", driven,
-                   driven ? "" : " (stock AI)");
+        /* Say which classes are driven and at which type index (#48): one
+         * session can serve a mixed level only if each class got its own
+         * observation slot. */
+        char classes[512];
+        int used = 0;
+        classes[0] = '\0';
+        for (int m = 0; m < model_count; m++)
+            for (int c = 0; c < models[m].class_count; c++) {
+                int count = 0;
+                for (int s = 0; s < DQ_BRAIN_MAX_MONSTERS; s++)
+                    if (monster_states[s].entity_index &&
+                        monster_states[s].model == &models[m] &&
+                        monster_states[s].type_index == models[m].classes[c].type_index)
+                        count++;
+                if (!count)
+                    continue;
+                used += q_snprintf(classes + used, sizeof(classes) - used, "%s%s %d (type %d)",
+                                   used ? ", " : "", models[m].classes[c].classname, count,
+                                   models[m].classes[c].type_index);
+            }
+        Con_Printf("deepquake: %d monster(s) driven by the model%s%s\n", driven,
+                   driven ? (classes[0] ? ": " : "") : " (stock AI)", classes);
     }
 }
 
@@ -603,9 +684,9 @@ __attribute__((constructor)) static void install_tick(void)
  *
  * Run from the client console: dq_selftest <model> <report_path>. Writes,
  * per case, the observation vector the C builder produced, the model's
- * probabilities and the greedy actions. The Python side (export parity
- * tests) builds the same reports through deepquake.monster and
- * onnxruntime and compares.
+ * probabilities and the greedy actions. A shared model reports the type
+ * index each case wore (#48). The Python side (export parity tests) builds
+ * the same reports through deepquake.monster and onnxruntime and compares.
  */
 static void dq_selftest_make_hook(double time, int visible, dqsim_hook_observation *hook)
 {
@@ -668,9 +749,13 @@ static void dq_selftest_run(const char *model_path, const char *report)
     int inferences = 0;
     for (int case_index = 0; case_index < 3; case_index++) {
         dqsim_hook_observation hook;
+        /* A shared model sees one body per case (Grunt, Dog, Grunt), so the
+         * report covers the type one-hot both ways (#48). */
+        if (state.model->type_dim > 0)
+            state.type_index = case_index % state.model->type_dim;
         dq_selftest_make_hook(case_index == 0 ? 0.0 : (case_index == 1 ? 0.5 : 6.0),
                               case_index < 2, &hook);
-        float obs[DQ_MONSTER_OBS_DIM];
+        float obs[DQ_MONSTER_OBS_MAX];
         dq_build_observation(&state, &hook, obs);
 
         int64_t shape[2] = {1, state.model->obs_dim};
@@ -713,8 +798,8 @@ static void dq_selftest_run(const char *model_path, const char *report)
             actions[head] = best;
             offset += state.model->nvec[head];
         }
-        fprintf(out, "case %d\nobs", case_index);
-        for (int i = 0; i < DQ_MONSTER_OBS_DIM; i++)
+        fprintf(out, "case %d type %d\nobs", case_index, state.type_index);
+        for (int i = 0; i < state.model->obs_dim; i++)
             fprintf(out, " %.6f", obs[i]);
         fprintf(out, "\nprobs");
         for (int i = 0; i < offset; i++)

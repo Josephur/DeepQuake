@@ -4,18 +4,20 @@
     python3 tools/download_model.py grunt
     python3 tools/download_model.py grunt --repo Josephur/DeepQuake --tag models-v1
 
-Fetches the release asset ``<name>.zip`` (model, layout sidecar, manifest),
+Fetches the release asset ``<name>.zip`` (model, layout sidecars, manifest),
 verifies every checksum in the manifest against the downloaded bytes, and
-installs the three files under ``models/<name>/``. Standard library only;
-GitHub API access needs no auth for public releases.
+installs the files under ``models/<name>/``. A format 2 manifest (#48) also
+carries the monster class map (``<name>.onnx.monsters``) and its checksum;
+a format 1 manifest (models-v1) has neither and still installs. Standard
+library only; GitHub API access needs no auth for public releases.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
-import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -33,6 +35,43 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def install_archive(data: bytes, name: str, models_dir: Path) -> Path:
+    """Verify a release zip and install it under ``models_dir/name``.
+
+    Every checksum the manifest carries is checked against the bytes inside
+    the archive before anything is written, so a truncated or tampered asset
+    never lands on disk.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = archive.namelist()
+        if "manifest.json" not in names:
+            raise SystemExit("the asset has no manifest.json; refusing to install")
+        manifest = json.loads(archive.read("manifest.json"))
+        version = manifest.get("format_version")
+        if version not in (1, 2):
+            raise SystemExit(f"unsupported manifest format {version}")
+        checksums = [
+            ("onnx_sha256", f"{name}.onnx"),
+            ("sidecar_sha256", f"{name}.onnx.nvec"),
+        ]
+        if version >= 2:
+            checksums.append(("monsters_sha256", f"{name}.onnx.monsters"))
+        for key, filename in checksums:
+            if filename not in names:
+                raise SystemExit(f"the asset is missing {filename}")
+            actual = hashlib.sha256(archive.read(filename)).hexdigest()
+            if actual != manifest[key]:
+                raise SystemExit(
+                    f"checksum mismatch for {filename}: "
+                    f"manifest {manifest[key]} vs downloaded {actual}"
+                )
+        out_dir = models_dir / name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for filename in names:
+            (out_dir / filename).write_bytes(archive.read(filename))
+    return out_dir
 
 
 def main() -> None:
@@ -67,36 +106,10 @@ def main() -> None:
         )
 
     data = fetch(asset["browser_download_url"])
-    with tempfile.TemporaryDirectory() as tmp:
-        zip_path = Path(tmp) / f"{args.name}.zip"
-        zip_path.write_bytes(data)
-        with zipfile.ZipFile(zip_path) as archive:
-            names = archive.namelist()
-            if "manifest.json" not in names:
-                raise SystemExit("the asset has no manifest.json; refusing to install")
-            manifest = json.loads(archive.read("manifest.json"))
-            if manifest.get("format_version") != 1:
-                raise SystemExit(f"unsupported manifest format {manifest.get('format_version')}")
-            for key, filename in (
-                ("onnx_sha256", f"{args.name}.onnx"),
-                ("sidecar_sha256", f"{args.name}.onnx.nvec"),
-            ):
-                if filename not in names:
-                    raise SystemExit(f"the asset is missing {filename}")
-                actual = hashlib.sha256(archive.read(filename)).hexdigest()
-                if actual != manifest[key]:
-                    raise SystemExit(
-                        f"checksum mismatch for {filename}: "
-                        f"manifest {manifest[key]} vs downloaded {actual}"
-                    )
-            out_dir = args.models_dir / args.name
-            out_dir.mkdir(parents=True, exist_ok=True)
-            for filename in names:
-                (out_dir / filename).write_bytes(archive.read(filename))
-    manifest_path = args.models_dir / args.name / "manifest.json"
-    onnx_path = args.models_dir / args.name / f"{args.name}.onnx"
+    out_dir = install_archive(data, args.name, args.models_dir)
+    onnx_path = out_dir / f"{args.name}.onnx"
     digest = sha256_file(onnx_path)[:12]
-    print(f"installed {args.name} (onnx sha256 {digest}...) under {manifest_path.parent}")
+    print(f"installed {args.name} (onnx sha256 {digest}...) under {out_dir}")
 
 
 if __name__ == "__main__":

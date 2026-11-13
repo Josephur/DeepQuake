@@ -1,23 +1,25 @@
-"""Evaluate the monster-side policy against the stock Grunt (#35, #36).
+"""Evaluate the monster-side policy against the stock monster (#35, #36).
 
-    uv run python -m deepquake.eval_monster runs/grunt_pool/checkpoint.pt
-    uv run python -m deepquake.eval_monster runs/grunt_pool/checkpoint.pt --skill 2
+    uv run python -m deepquake.eval_monster runs/roster_pool/checkpoint.pt
+    uv run python -m deepquake.eval_monster runs/roster_pool/checkpoint.pt --monster monster_dog
 
 For every skill level and every map, both brains play the same fixed
 tasks (``(load_seed, monster_choice, task_seed, skill)`` from the
 training placement) against the same player opponent: the **stock**
-QuakeC Grunt (no hook; stock AI decides) and the **trained** policy
-through the brain hook. The reported win rate is the player's death
-rate — how often the monster side kills the player — so the comparison
-answers #35's question: does the trained policy beat the stock Grunt?
+QuakeC brain of the class (no hook; stock AI decides) and the **trained**
+policy through the brain hook, wearing that class. The reported win rate
+is the player's death rate — how often the monster side kills the player
+— so the comparison answers #35's question: does the trained policy beat
+the stock brain? ``--monster`` picks the body (#48); the policy is the
+shared model, so one checkpoint is measured once per class.
 
 The player opponent is fixed per invocation (``--opponent``): a trained
 player checkpoint (the default; #38's option-E sparring partner), the
 scripted shooter, or a random player. Training and held-out maps are
 reported as separate groups (rule 3 of map independence). One process
 per map builds the walk graph once and runs all its cells; writes
-``eval_monster.json`` next to the checkpoint, or prints only without
-one.
+``eval_monster_<class>.json`` next to the checkpoint, or prints only
+without one.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import monster_env, nav, sim
+from . import monster, monster_env, nav, sim
 from .eval_nav import TrainedPolicy
 
 SKILLS = (0, 1, 2, 3)
@@ -42,6 +44,7 @@ def run_map(
     policy_path: str | None,
     episodes: int,
     seed: int,
+    monster: str = "monster_army",
 ) -> dict:
     """All skill cells for one map; the walk graph builds once here."""
     try:
@@ -51,7 +54,12 @@ def run_map(
             raise  # pool workers are reused across maps: already initialised
     points = nav.NavEnv(map_name, seed=12345).points
     env = monster_env.MonsterEnv(
-        map_name, seed=12345, opponent=opponent, brain=brain, points=points
+        map_name,
+        seed=12345,
+        monster=monster,
+        opponent=opponent,
+        brain=brain,
+        points=points,
     )
     policy = None
     if brain == "policy" and policy_path is not None:
@@ -87,6 +95,13 @@ def main() -> None:
         help="player checkpoint for --opponent trained",
     )
     parser.add_argument(
+        "--monster",
+        default="monster_army",
+        help="which monster class the policy wears and the stock brain plays "
+        "(default: monster_army; use monster_dog to measure the shared "
+        "model's Dog)",
+    )
+    parser.add_argument(
         "--maps",
         type=str,
         nargs="*",
@@ -115,6 +130,8 @@ def main() -> None:
     if args.sanity:
         args.opponent = "shooter"
         args.checkpoint = None
+    if args.monster not in monster.MONSTER_TYPES:
+        raise SystemExit(f"--monster must be one of {monster.MONSTER_TYPES}, got {args.monster!r}")
     if args.opponent == "trained" and not args.opponent_checkpoint.exists():
         raise SystemExit(f"{args.opponent_checkpoint} does not exist")
     opponent = monster_env.PlayerOpponent(
@@ -138,6 +155,7 @@ def main() -> None:
                 str(args.checkpoint) if args.checkpoint else None,
                 args.episodes,
                 args.seed,
+                args.monster,
             )
             for group, map_name, brain in work
         }
@@ -194,6 +212,7 @@ def main() -> None:
 
     out = {
         "checkpoint": str(args.checkpoint) if args.checkpoint else None,
+        "monster": args.monster,
         "opponent": {"kind": args.opponent, "checkpoint": str(args.opponent_checkpoint)},
         "episodes": args.episodes,
         "seed": args.seed,
@@ -208,7 +227,7 @@ def main() -> None:
                     total = rates["win_rate"] + rates["loss_rate"] + rates["timeout_rate"]
                     assert abs(total - 1.0) < 1e-9, (group, map_name, key, total)
     if args.checkpoint:
-        out_path = args.checkpoint.parent / "eval_monster.json"
+        out_path = args.checkpoint.parent / f"eval_monster_{args.monster}.json"
         out_path.write_text(json.dumps(out, indent=2) + "\n")
         print(f"wrote {out_path}")
 

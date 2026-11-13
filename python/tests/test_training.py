@@ -273,6 +273,168 @@ def test_worker_rollouts_are_reproducible():
     assert not np.array_equal(first["act"], other["act"])
 
 
+def test_per_type_heads_are_selected_by_the_observation_one_hot():
+    """One shared trunk, one head per type (#48): the type picks the head."""
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo
+
+    ppo.seed_everything(0)
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM,
+        monster_env.MONSTER_ACTION_NVEC,
+        hidden=8,
+        n_types=monster.N_MONSTER_TYPES,
+    )
+    assert len(model.policy_heads) == monster.N_MONSTER_TYPES
+    with torch.no_grad():
+        model.policy_heads[1].weight.add_(1.0)  # make the two heads differ
+
+    obs = torch.zeros(2, monster.MONSTER_OBS_DIM)
+    obs[0, monster.MONSTER_OBS_BASE_DIM + 0] = 1.0  # Grunt
+    obs[1, monster.MONSTER_OBS_BASE_DIM + 1] = 1.0  # Dog
+    hidden = torch.ones(2, model.hidden)
+    logits = model.head_logits(hidden, obs)
+    assert torch.allclose(logits[0], model.policy_heads[0](hidden)[0])
+    assert torch.allclose(logits[1], model.policy_heads[1](hidden)[1])
+    assert not torch.allclose(logits[0], logits[1])
+    # The value is one shared head whatever the body.
+    assert torch.equal(model.value(hidden)[0], model.value(hidden)[1])
+    with pytest.raises(ValueError, match="observation"):
+        model.head_logits(hidden)
+
+
+def test_warm_start_reproduces_the_single_type_policy():
+    """The Grunt's brain carries over exactly; the new type columns are zero."""
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo
+
+    ppo.seed_everything(5)
+    source = ppo.ActorCritic(
+        monster.MONSTER_OBS_BASE_DIM, monster_env.MONSTER_ACTION_NVEC, hidden=16
+    )
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM,
+        monster_env.MONSTER_ACTION_NVEC,
+        hidden=16,
+        n_types=monster.N_MONSTER_TYPES,
+    )
+    model.init_from(source)
+
+    # The trunk took the source's input columns and zeroed the new ones.
+    assert torch.equal(
+        model.gru.weight_ih_l0[:, : monster.MONSTER_OBS_BASE_DIM],
+        source.gru.weight_ih_l0,
+    )
+    assert torch.count_nonzero(model.gru.weight_ih_l0[:, monster.MONSTER_OBS_BASE_DIM :]) == 0
+    assert torch.equal(model.gru.weight_hh_l0, source.gru.weight_hh_l0)
+
+    rng = np.random.default_rng(0)
+    base = rng.standard_normal((4, monster.MONSTER_OBS_BASE_DIM)).astype(np.float32)
+    for index in range(monster.N_MONSTER_TYPES):
+        obs = np.zeros((4, monster.MONSTER_OBS_DIM), dtype=np.float32)
+        obs[:, : monster.MONSTER_OBS_BASE_DIM] = base
+        obs[:, monster.MONSTER_OBS_BASE_DIM + index] = 1.0
+        want = source.act(torch.as_tensor(base), source.initial_hidden(4), greedy=True)
+        got = model.act(torch.as_tensor(obs), model.initial_hidden(4), greedy=True)
+        assert torch.equal(want[0], got[0])  # same actions
+        assert torch.allclose(want[1], got[1])  # same log-probability
+        assert torch.allclose(want[2], got[2])  # same value
+        assert torch.allclose(want[3], got[3])  # same next recurrent state
+
+
+def test_a_shared_model_checkpoint_round_trips(tmp_path):
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo
+
+    ppo.seed_everything(6)
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM,
+        monster_env.MONSTER_ACTION_NVEC,
+        hidden=8,
+        n_types=monster.N_MONSTER_TYPES,
+    )
+    path = tmp_path / "shared.pt"
+    ppo.save_checkpoint(path, model, None, {"total_steps": 1})
+    restored, saved = ppo.load_model(path)
+    assert saved["spec"]["n_types"] == monster.N_MONSTER_TYPES
+    obs = torch.randn(3, monster.MONSTER_OBS_DIM)
+    obs[:, monster.MONSTER_OBS_BASE_DIM :] = 0.0
+    obs[:, monster.MONSTER_OBS_BASE_DIM] = 1.0
+    hidden = model.initial_hidden(3)
+    assert torch.equal(
+        model.act(obs, hidden, greedy=True)[0], restored.act(obs, hidden, greedy=True)[0]
+    )
+
+
+def test_trained_policy_drives_a_shared_model(tmp_path):
+    """Evaluation's policy wrapper feeds the type one-hot through (#48)."""
+    pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo
+    from deepquake.eval_nav import TrainedPolicy
+
+    ppo.seed_everything(7)
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM,
+        monster_env.MONSTER_ACTION_NVEC,
+        hidden=8,
+        n_types=monster.N_MONSTER_TYPES,
+    )
+    path = tmp_path / "shared.pt"
+    ppo.save_checkpoint(path, model, None, {"total_steps": 0})
+    policy = TrainedPolicy(path, seed=0)
+    for index in range(monster.N_MONSTER_TYPES):
+        obs = np.zeros(monster.MONSTER_OBS_DIM, dtype=np.float32)
+        obs[monster.MONSTER_OBS_BASE_DIM + index] = 1.0
+        action = policy(obs)
+        assert action.shape == (len(monster_env.MONSTER_ACTION_NVEC),)
+        assert all(
+            0 <= int(a) < n for a, n in zip(action, monster_env.MONSTER_ACTION_NVEC, strict=True)
+        )
+
+
+def test_monster_list_covers_every_type_in_one_run():
+    """A shared-policy run names its classes; unknown ones fail loudly (#48)."""
+    from deepquake import train_monster
+
+    assert train_monster.monster_list({"monsters": ["monster_army", "monster_dog"]}) == [
+        "monster_army",
+        "monster_dog",
+    ]
+    assert train_monster.monster_list({"monster": "monster_dog"}) == ["monster_dog"]
+    assert train_monster.monster_list({}) == ["monster_army"]
+    with pytest.raises(ValueError, match="unknown monster classes"):
+        train_monster.monster_list({"monsters": ["monster_ogre"]})
+
+
+def test_the_trainer_warm_starts_and_refuses_a_missing_source(tmp_path):
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo, train_monster
+
+    ppo.seed_everything(8)
+    source = ppo.ActorCritic(
+        monster.MONSTER_OBS_BASE_DIM, monster_env.MONSTER_ACTION_NVEC, hidden=8
+    )
+    path = tmp_path / "grunt.pt"
+    ppo.save_checkpoint(path, source, None, {"total_steps": 10})
+    model = train_monster.build_model(
+        {"init_from": str(path)}, ppo.PPOConfig(hidden=8), torch.device("cpu")
+    )
+    assert model.n_types == monster.N_MONSTER_TYPES
+    base = np.random.default_rng(0).standard_normal((3, monster.MONSTER_OBS_BASE_DIM))
+    obs = np.zeros((3, monster.MONSTER_OBS_DIM), dtype=np.float32)
+    obs[:, : monster.MONSTER_OBS_BASE_DIM] = base
+    obs[:, monster.MONSTER_OBS_BASE_DIM] = 1.0
+    want = source.act(
+        torch.as_tensor(base, dtype=torch.float32), source.initial_hidden(3), greedy=True
+    )
+    got = model.act(torch.as_tensor(obs), model.initial_hidden(3), greedy=True)
+    assert torch.equal(want[0], got[0])
+    with pytest.raises(SystemExit, match="init_from"):
+        train_monster.build_model(
+            {"init_from": str(tmp_path / "absent.pt")}, ppo.PPOConfig(hidden=8), "cpu"
+        )
+
+
 def test_the_memory_persists_across_rollouts():
     """A worker's recurrent state carries from one rollout into the next."""
     pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")

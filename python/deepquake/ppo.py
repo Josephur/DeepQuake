@@ -48,19 +48,39 @@ class ActorCritic(nn.Module):
 
     ARCH = "gru"
 
-    def __init__(self, obs_dim: int, action_nvec: tuple[int, ...], hidden: int = 256):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_nvec: tuple[int, ...],
+        hidden: int = 256,
+        n_types: int | None = None,
+    ):
         super().__init__()
         self.obs_dim = obs_dim
         self.action_nvec = tuple(action_nvec)
         self.hidden = hidden
+        self.n_types = n_types
         # A one-layer nn.GRU is the same cell as GRUCell, and unlike the cell
         # it accepts packed variable-length batches, which the update replays
         # in a single call (#20).
         self.gru = nn.GRU(obs_dim, hidden, batch_first=True)
-        self.policy_head = nn.Linear(hidden, sum(self.action_nvec))
+        # One shared network for every monster type (#48): the trunk is
+        # shared, the type comes in as a one-hot at the end of the
+        # observation, and a small head per type turns the state into that
+        # body's actions. With n_types unset (navigation, the player policy)
+        # there is one head, exactly as before.
+        if n_types is None:
+            self.policy_head = nn.Linear(hidden, sum(self.action_nvec))
+            nn.init.orthogonal_(self.policy_head.weight, 0.01)
+            nn.init.zeros_(self.policy_head.bias)
+        else:
+            self.policy_heads = nn.ModuleList(
+                nn.Linear(hidden, sum(self.action_nvec)) for _ in range(n_types)
+            )
+            for head in self.policy_heads:
+                nn.init.orthogonal_(head.weight, 0.01)
+                nn.init.zeros_(head.bias)
         self.value_head = nn.Linear(hidden, 1)
-        nn.init.orthogonal_(self.policy_head.weight, 0.01)
-        nn.init.zeros_(self.policy_head.bias)
 
     def initial_hidden(self, n: int, device=None) -> torch.Tensor:
         """Zero state for ``n`` episodes (or fresh environments)."""
@@ -70,8 +90,32 @@ class ActorCritic(nn.Module):
         """One GRU step: the observation and previous state give the new state."""
         return self.gru(obs.unsqueeze(1), hidden.unsqueeze(0))[1].squeeze(0)
 
-    def distributions(self, hidden: torch.Tensor) -> list[torch.distributions.Categorical]:
-        logits = self.policy_head(hidden)
+    def head_list(self) -> list[nn.Linear]:
+        """The policy head or heads, in type order."""
+        return list(self.policy_heads) if self.n_types is not None else [self.policy_head]
+
+    def head_logits(self, hidden: torch.Tensor, obs: torch.Tensor | None = None) -> torch.Tensor:
+        """Per-head logits. With per-type heads, ``obs``'s one-hot picks one.
+
+        Selection is a weighted sum over the heads' weights, not a gather:
+        it is one tensor expression the ONNX exporter turns into plain
+        multiply/add ops, and the exported graph keeps a single observation
+        input, which is what the play client feeds.
+        """
+        if self.n_types is None:
+            return self.policy_head(hidden)
+        if obs is None:
+            raise ValueError("an observation is required to choose between per-type heads")
+        one_hot = obs[:, obs.shape[-1] - self.n_types :]
+        weights = torch.stack([head.weight for head in self.policy_heads])
+        biases = torch.stack([head.bias for head in self.policy_heads])
+        selected = torch.einsum("bt,toh->boh", one_hot, weights)
+        return torch.bmm(selected, hidden.unsqueeze(-1)).squeeze(-1) + one_hot @ biases
+
+    def distributions(
+        self, hidden: torch.Tensor, obs: torch.Tensor | None = None
+    ) -> list[torch.distributions.Categorical]:
+        logits = self.head_logits(hidden, obs)
         return [
             torch.distributions.Categorical(logits=part)
             for part in logits.split(self.action_nvec, dim=-1)
@@ -94,7 +138,7 @@ class ActorCritic(nn.Module):
         evaluation share one reproducible stream instead of the global one.
         """
         hidden = self.advance(obs, hidden)
-        dists = self.distributions(hidden)
+        dists = self.distributions(hidden, obs)
         if greedy:
             actions = torch.stack([d.probs.argmax(-1) for d in dists], dim=-1)
         else:
@@ -105,12 +149,44 @@ class ActorCritic(nn.Module):
         log_prob = torch.stack([d.log_prob(actions[:, i]) for i, d in enumerate(dists)]).sum(0)
         return actions, log_prob, self.value(hidden), hidden
 
-    def evaluate(self, hidden: torch.Tensor, actions: torch.Tensor):
+    def evaluate(
+        self, hidden: torch.Tensor, actions: torch.Tensor, obs: torch.Tensor | None = None
+    ):
         """Log-probability, entropy and value of given actions, from a state."""
-        dists = self.distributions(hidden)
+        dists = self.distributions(hidden, obs)
         log_prob = torch.stack([d.log_prob(actions[:, i]) for i, d in enumerate(dists)]).sum(0)
         entropy = torch.stack([d.entropy() for d in dists]).sum(0)
         return log_prob, entropy, self.value(hidden)
+
+    def init_from(self, source: ActorCritic) -> None:
+        """Warm start from another network: take its trunk, keep its behaviour.
+
+        Every shared parameter is copied. When this network is wider (the
+        type one-hot appended to the observation), the extra input columns
+        are zeroed, so a one-hot through them contributes nothing and this
+        network acts exactly like the source did — the new body starts from
+        the old brain instead of from nothing. Each per-type head takes the
+        source's head of the same index, or its only head when the source had
+        one, so a second type also starts from the first type's policy.
+        """
+        with torch.no_grad():
+            source_gru = dict(source.gru.named_parameters())
+            for name, target in self.gru.named_parameters():
+                origin = source_gru[name]
+                if target.shape == origin.shape:
+                    target.copy_(origin)
+                elif name.startswith("weight_ih"):
+                    columns = min(origin.shape[1], target.shape[1])
+                    target.zero_()
+                    target[:, :columns].copy_(origin[:, :columns])
+                else:
+                    raise ValueError(
+                        f"cannot warm start {name}: {tuple(origin.shape)} -> {tuple(target.shape)}"
+                    )
+            origins = source.head_list()
+            for index, head in enumerate(self.head_list()):
+                head.load_state_dict(origins[min(index, len(origins) - 1)].state_dict())
+            self.value_head.load_state_dict(source.value_head.state_dict())
 
     def spec(self) -> dict:
         """What is needed, besides the weights, to rebuild this network."""
@@ -119,6 +195,7 @@ class ActorCritic(nn.Module):
             "obs_dim": self.obs_dim,
             "action_nvec": self.action_nvec,
             "hidden": self.hidden,
+            "n_types": self.n_types,
         }
 
 
@@ -222,7 +299,7 @@ def packed_replay(
     out, _ = model.gru(packed, hidden0.unsqueeze(0))
     out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
     valid = valid[:, : out.shape[1]]
-    log_prob, entropy, value = model.evaluate(out[valid], actions[valid])
+    log_prob, entropy, value = model.evaluate(out[valid], actions[valid], obs[valid])
     flat_owner = owner.to(device).unsqueeze(1).expand_as(valid)[valid]
     flat_time = time[:, : out.shape[1]][valid]
     return flat_owner, flat_time, log_prob, entropy, value

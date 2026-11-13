@@ -1,4 +1,4 @@
-"""The monster-side combat environment (#35): a hooked Grunt against a player.
+"""The monster-side combat environment (#35): a hooked monster against a player.
 
 Roles inverted from :mod:`combat`: the policy under training drives the
 *monster* through the brain hook, and the environment drives the *player*
@@ -7,6 +7,11 @@ opponent (random, the scripted shooter, or a trained player checkpoint —
 env contract is exactly :class:`combat.CombatEnv`'s, so
 :class:`deepquake.vec.ProcVecEnv`, :class:`deepquake.ppo.RolloutActor` and
 PPO work unmodified.
+
+Which body the policy wears is a per-episode choice (#48): ``monsters``
+lists every class a shared model should learn, sampled in :meth:`reset`,
+while a single ``monster`` pins one class for evaluation and for the
+single-type runs of #35.
 
 The brain hook fires every tick, but decisions are made every
 :data:`nav.FRAME_SKIP` ticks, aligned with the player's decision rate: the
@@ -21,7 +26,7 @@ Skill scales the engine's handicaps (reaction delay, aim error; #34) via
 ``load_map(skill=...)`` and is also an observation input (#33); both sides
 of a task always agree on it. Reward is #32's sparse terminal (+1 the
 player dies, -1 the monster dies, 0 timeout); a player killed by any
-monster counts — the other stock Grunts on a map are part of the task,
+monster counts — the other stock monsters on a map are part of the task,
 for the trained and the stock brain alike.
 
 Observation (monster side, length :data:`monster_obs.MONSTER_OBS_DIM`): see
@@ -126,6 +131,7 @@ class MonsterEnv:
         *,
         seed: int = 0,
         monster: str = "monster_army",
+        monsters: Sequence[str] | None = None,
         opponent: PlayerOpponent | None = None,
         timeout_steps: int = 600,
         min_distance: float = 200.0,
@@ -147,8 +153,14 @@ class MonsterEnv:
             raise ValueError(
                 "styles must be a non-empty sequence of (aggression, caution, stealth)"
             )
+        # ``monsters`` is the shared-policy case (#48): the class is sampled
+        # per episode, so one network sees both bodies in one run. A single
+        # ``monster`` pins the class, which is what evaluation wants.
+        self.monsters = tuple(monsters) if monsters is not None else (monster,)
+        if not self.monsters:
+            raise ValueError("monsters must name at least one monster class")
         self.map_name = map_name
-        self.monster = monster
+        self.monster = self.monsters[0]
         self.opponent = (opponent or PlayerOpponent("shooter")).build(seed * 1000 + 777)
         self.timeout_steps = timeout_steps
         self.min_distance = min_distance
@@ -243,16 +255,18 @@ class MonsterEnv:
         skill: int,
         style: tuple[float, float, float],
     ) -> np.ndarray:
-        grunts = self._fresh_load(load_seed, skill)
-        if not grunts:
+        candidates = self._fresh_load(load_seed, skill)
+        if not candidates:
             raise RuntimeError(f"no {self.monster} on {self.map_name}")
-        grunt = grunts[monster_choice % len(grunts)]
-        self.monster_index = grunt.index
-        self._place_player(grunt, np.random.default_rng(task_seed))
+        chosen = candidates[monster_choice % len(candidates)]
+        self.monster_index = chosen.index
+        self._place_player(chosen, np.random.default_rng(task_seed))
         self.steps = 0
         self._hook_obs = None
         self._held = None
-        self.observer = monster_obs.MonsterObserver(skill=skill, style=style)
+        self.observer = monster_obs.MonsterObserver(
+            skill=skill, style=style, monster_type=self.monster
+        )
         self.skill = skill
         if self.brain == "policy":
             sim.set_policy_hook(self.monster_index, self._hook_policy)
@@ -275,6 +289,9 @@ class MonsterEnv:
 
     def reset(self) -> np.ndarray:
         for _attempt in range(20):
+            # Training with a shared policy samples the body per episode, so
+            # one network sees every class it was trained for (#48).
+            self.monster = self.monsters[int(self.rng.integers(len(self.monsters)))]
             try:
                 return self._start(
                     int(self.rng.integers(2**31)),

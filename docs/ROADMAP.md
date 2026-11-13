@@ -294,6 +294,31 @@ decisions, and the outcome rates are asserted to fill exactly 100%.
 
 ## M6 — Full roster
 
-- [ ] Remaining monster types, simplest first
+- [ ] Remaining monster types, simplest first (#46: every monster of a class driven; #47: the Dog driven; #48: the Dog joins the Grunt in one shared model, release `models-v2`)
 - [ ] Group coordination between monsters
 - [ ] Style settings exposed as cvars; difficulty handicaps tuned per monster type (difficulty itself follows `skill` from M4, see ARCHITECTURE.md)
+
+Shared model, second type (2026-11-13, #48: `configs/roster_pool.toml`,
+one network for the Grunt and the Dog, type one-hot appended to the
+observation, a policy head per type; warm-started from `grunt_pool` and
+fine-tuned 10,000,896 decisions on e1m1/e2m1/e4m1 with both bodies sampled
+per episode, e3m1 held out; everything else as `grunt_pool`). Same
+evaluation as M4 (50 fixed tasks per map and skill, trained player
+opponent); the stock Grunt row reproduces M4's exactly:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps, stock Dog | 46.7% | 52.0% | 63.3% | 65.3% |
+| Training maps, shared model's Dog | 51.3% | 56.0% | **69.3%** | 72.7% |
+| Held-out e3m1, stock Dog | 72.0% | 90.0% | 76.0% | 74.0% |
+| Held-out e3m1, shared model's Dog | 76.0% | 90.0% | **88.0%** | 84.0% |
+| Training maps, single-type Grunt (M4) | 43.3% | 58.7% | 67.3% | 70.0% |
+| Training maps, shared model's Grunt | 45.3% | 56.0% | 65.3% | 72.0% |
+| Held-out e3m1, single-type Grunt (M4) | 58.0% | 82.0% | 82.0% | 74.0% |
+| Held-out e3m1, shared model's Grunt | 58.0% | 84.0% | 84.0% | 78.0% |
+
+The Dog is ahead of the stock Dog in 7 of 8 cells (equal in one) and the
+Grunt does not regress after sharing (within -2.7 to +4.0 points of the
+single-type model, 5 cells up, 2 down, 1 equal; about one standard error).
+In the client, `roster` drives all 42 Grunts and Dogs of e1m1 from one
+session at 45-46 microseconds per decision (the v1 Grunt model: 32).

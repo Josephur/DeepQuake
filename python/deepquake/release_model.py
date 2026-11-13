@@ -3,14 +3,18 @@
     uv run python -m deepquake.release_model runs/grunt_pool models grunt
 
 Exports the run's checkpoint to ONNX (deepquake.export_onnx: graph,
-layout sidecar, inline parity check), then writes ``<models_dir>/<name>/``
-with the model, its sidecar, and a manifest:
+layout sidecars, inline parity check), then writes ``<models_dir>/<name>/``
+with the model, its sidecars, and a manifest:
 
-- ``format_version`` — the manifest schema (1);
+- ``format_version`` — the manifest schema (2; 1 is the v1 layout, no
+  class map — models-v1 stays installable);
 - ``name``, ``source_run``, ``total_steps`` — provenance;
 - ``obs_dim``, ``action_nvec`` — the layout identity a stale model is
   refused by;
-- ``onnx_sha256``, ``sidecar_sha256`` — what the download tool verifies.
+- ``monsters`` — the monster classes the model drives, in type order, and
+  the type index each one's observation one-hot uses (#48);
+- ``onnx_sha256``, ``sidecar_sha256``, ``monsters_sha256`` — what the
+  download tool verifies.
 
 Re-running over the same run directory reproduces every byte: the
 manifest carries no timestamps and is never hand-edited.
@@ -25,7 +29,7 @@ from pathlib import Path
 
 from . import REPO_ROOT, export_onnx
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 
 def sha256_file(path: Path) -> str:
@@ -46,6 +50,7 @@ def release_model(run_dir: Path, models_dir: Path, name: str) -> Path:
     onnx_path = out_dir / f"{name}.onnx"
     spec = export_onnx.export_onnx(checkpoint, onnx_path)
     sidecar = Path(str(onnx_path) + ".nvec")
+    class_map = Path(str(onnx_path) + ".monsters")
 
     manifest = {
         "format_version": MANIFEST_VERSION,
@@ -57,6 +62,9 @@ def release_model(run_dir: Path, models_dir: Path, name: str) -> Path:
         "onnx_sha256": sha256_file(onnx_path),
         "sidecar_sha256": sha256_file(sidecar),
     }
+    if spec["monsters"]:
+        manifest["monsters"] = spec["monsters"]
+        manifest["monsters_sha256"] = sha256_file(class_map)
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path

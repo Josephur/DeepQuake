@@ -248,6 +248,27 @@ The issue tracker is the project's history. Use the `gh` CLI.
   hygiene check refuses any commit while a vendored file differs from
   upstream or the fidelity reference has local changes, and never measure
   fidelity against anything but the untouched reference.
+- **The play client never runs on the user's desktop.** The maintainer uses
+  this machine while you work: never open a client window or play its sound
+  on their display. Run every client launch (`build/*/bin/deepquake`) inside
+  its own virtual X server with audio off, and log the console to a file:
+
+  ```bash
+  mkdir -p runs/client_user
+  env -C runs/client_user -u WAYLAND_DISPLAY SDL_VIDEODRIVER=x11 SDL_AUDIODRIVER=dummy \
+      xvfb-run -a -s "-screen 0 1024x768x24" \
+      timeout 60 ../../build/release/bin/deepquake -basedir ../../gamedata \
+      -userdir . -window +set dq_model ../../models/<name>/<name>.onnx +skill 2 +map e1m1 \
+      > runs/client.log 2>&1
+  ```
+
+  Unsetting `WAYLAND_DISPLAY` and forcing `SDL_VIDEODRIVER=x11` matter: on a
+  Wayland desktop SDL otherwise ignores the virtual display and opens the
+  window on the real one. The client writes `history.txt` (and, with
+  `-condebug`, `qconsole.log`) into its working directory, hence `env -C`
+  into the ignored `runs/client_user`; the console also goes to stdout,
+  hence the redirect. Measure per-decision cost only while nothing else
+  heavy runs on the CPU.
 - **One simulator per process.** The engine's state is global. Never try to
   run two simulations in one process or call it from two threads; use worker
   processes. `dqsim_init` can be called once per process, which is why Python

@@ -16,6 +16,13 @@ policy-driven monster of a tick into one inference. The head layout is
 deliberately *not* stored in the file: the model manifest (#45) carries
 the observation/action layout identity so a stale model refuses to load.
 
+Two sidecars sit next to the model: ``<model>.nvec`` (action-head sizes,
+then the turn grid) and, for a monster policy, ``<model>.monsters`` —
+one ``<classname> <type index>`` per line, the class a shared model
+drives and the one-hot slot its observation ends with (#48). A player
+policy has no class map. A shared model's parity batch uses real
+one-hots, one body per row, so the check exercises the per-type heads.
+
 Verification: the export runs an onnxruntime parity check inline —
 seeded observations through both the PyTorch policy and the exported
 graph, greedy actions and probabilities compared — and the test suite
@@ -44,7 +51,7 @@ class _PolicyGraph(nn.Module):
 
     def forward(self, obs: torch.Tensor, hidden: torch.Tensor):
         new_hidden = self.model.gru(obs.unsqueeze(1), hidden.unsqueeze(0))[1].squeeze(0)
-        logits = self.model.policy_head(new_hidden)
+        logits = self.model.head_logits(new_hidden, obs)
         probs = torch.cat(
             [torch.softmax(part, dim=-1) for part in logits.split(self.model.action_nvec, dim=-1)],
             dim=-1,
@@ -81,9 +88,15 @@ def export_onnx(checkpoint_path: Path, out_path: Path, *, samples: int = 64, see
         dynamo=False,  # the TorchScript exporter: no onnxscript dependency
     )
 
-    # Parity: the same seeded inputs through both implementations.
+    # Parity: the same seeded inputs through both implementations. For a
+    # shared model the type one-hot must be a real one-hot, so each row is
+    # one body rather than a mixture of heads.
     rng = np.random.default_rng(seed)
     batch = rng.standard_normal((samples, obs_dim)).astype(np.float32)
+    if model.n_types is not None:
+        batch[:, -model.n_types :] = 0.0
+        for row in range(samples):
+            batch[row, obs_dim - model.n_types + row % model.n_types] = 1.0
     hidden = rng.standard_normal((samples, model.hidden)).astype(np.float32)
     with torch.no_grad():
         probs_torch, _value_torch, hidden_torch = wrapper(
@@ -96,7 +109,7 @@ def export_onnx(checkpoint_path: Path, out_path: Path, *, samples: int = 64, see
     )
     # The client's layout sidecar: the action-head sizes, one line, then
     # the turn grid the decision maps through (monster_env's, in degrees).
-    from . import monster_env
+    from . import monster, monster_env
 
     sidecar = Path(str(out_path) + ".nvec")
     sidecar.write_text(
@@ -105,6 +118,39 @@ def export_onnx(checkpoint_path: Path, out_path: Path, *, samples: int = 64, see
         + " ".join(f"{d:g}" for d in monster_env.MONSTER_TURN_DEGREES)
         + "\n"
     )
+
+    # Which monster classes this model drives, and which type index each one
+    # is in the shared observation (deepquake.monster.MONSTER_TYPES). The run
+    # records its classes in the checkpoint; the client reads this to route
+    # edicts to the model and to write the type one-hot (#48). A model that is
+    # not a monster policy (the player) gets no class map: nothing routes to
+    # it by classname.
+    declared = checkpoint.get("monsters")
+    if declared is None and model.n_types is None:
+        classes: list[str] | None = None
+    elif declared is None:
+        classes = list(monster.MONSTER_TYPES[: model.n_types])
+    else:
+        classes = list(declared)
+        expected = model.n_types if model.n_types is not None else 1
+        if len(classes) != expected:
+            raise ValueError(
+                f"{checkpoint_path}: the run names {len(classes)} monster classes "
+                f"({classes}) but the network has {expected} type input(s)"
+            )
+    if classes is not None:
+        try:
+            indices = [(monster.MONSTER_TYPES.index(name), name) for name in classes]
+        except ValueError as exc:
+            raise ValueError(
+                f"{checkpoint_path}: unknown monster class in {classes}; "
+                f"known types are {monster.MONSTER_TYPES}"
+            ) from exc
+        monsters_path = Path(str(out_path) + ".monsters")
+        monsters_path.write_text("".join(f"{name} {index}\n" for index, name in sorted(indices)))
+        names = [name for _index, name in sorted(indices)]
+    else:
+        names = []
 
     deviation = float(np.max(np.abs(probs_onnx - probs_torch.numpy())))
     if deviation > 1e-5:
@@ -120,6 +166,8 @@ def export_onnx(checkpoint_path: Path, out_path: Path, *, samples: int = 64, see
         "obs_dim": obs_dim,
         "action_nvec": list(model.action_nvec),
         "hidden": model.hidden,
+        "n_types": model.n_types,
+        "monsters": names,
         "total_steps": checkpoint.get("total_steps"),
         "max_probability_deviation": deviation,
     }

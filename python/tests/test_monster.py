@@ -40,7 +40,7 @@ def _client(relative=(100.0, 0.0, 0.0), health=100.0):
 def test_layout_and_conditioning_inputs():
     observer = monster.MonsterObserver(skill=3, style=(0.0, 0.5, 1.0))
     obs = observer.observe(_hook())
-    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (119,)
+    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (121,)
     assert obs[BASE + 19] == 1.0  # skill 3 / 3
     assert list(obs[BASE + 20 : BASE + 23]) == [0.0, 0.5, 1.0]
     assert obs[BASE + 4] == pytest.approx(0.8)  # own health
@@ -48,6 +48,22 @@ def test_layout_and_conditioning_inputs():
         monster.MonsterObserver(skill=4)
     with pytest.raises(ValueError, match="style"):
         monster.MonsterObserver(style=(0.5, 1.5, 0.5))
+
+
+def test_monster_type_is_a_one_hot_at_the_end():
+    """The type input of the shared model (#48): one-hot, same for every tick."""
+    assert monster.MONSTER_TYPES == ("monster_army", "monster_dog")
+    army = monster.MonsterObserver(monster_type="monster_army").observe(_hook())
+    dog = monster.MonsterObserver(monster_type="monster_dog").observe(_hook())
+    type_slice = slice(monster.MONSTER_OBS_BASE_DIM, monster.MONSTER_OBS_DIM)
+    assert list(army[type_slice]) == [1.0, 0.0]
+    assert list(dog[type_slice]) == [0.0, 1.0]
+    # Nothing else depends on the type: the rest of the vector is identical.
+    np.testing.assert_array_equal(
+        army[: monster.MONSTER_OBS_BASE_DIM], dog[: monster.MONSTER_OBS_BASE_DIM]
+    )
+    with pytest.raises(ValueError, match="monster type"):
+        monster.MonsterObserver(monster_type="monster_ogre")
 
 
 def test_visible_enemy_and_memory():
@@ -189,6 +205,8 @@ def test_monster_env_validation_and_tasks():
         monster_env.MonsterEnv("e1m1", opponent=monster_env.PlayerOpponent("nope"))
     with pytest.raises(ValueError, match="checkpoint"):
         monster_env.PlayerOpponent("trained").build(0)
+    with pytest.raises(ValueError, match="monsters"):
+        monster_env.MonsterEnv("e1m1", monsters=())
 
     env = monster_env.MonsterEnv.__new__(monster_env.MonsterEnv)
     env.skills = (0, 1, 2, 3)
@@ -196,6 +214,100 @@ def test_monster_env_validation_and_tasks():
     second = monster_env.make_tasks(env, 5, seed=7)
     assert first == second and len(first) == 5
     assert all(task[3] in (0, 1, 2, 3) for task in first)
+
+
+def test_the_evaluator_pins_the_class_it_measures(monkeypatch):
+    """Per-type evaluation: --monster reaches the environment (#48)."""
+    from deepquake import eval_monster, monster_env
+
+    seen = {}
+
+    class FakeEnv:
+        def __init__(self, map_name, **kwargs):
+            seen.update(kwargs)
+            seen["map_name"] = map_name
+
+    monkeypatch.setattr(eval_monster, "sim", type("S", (), {"init": staticmethod(lambda: None)}))
+    monkeypatch.setattr(eval_monster.nav, "NavEnv", lambda *a, **k: type("N", (), {"points": 0})())
+    monkeypatch.setattr(eval_monster.monster_env, "MonsterEnv", FakeEnv)
+    monkeypatch.setattr(eval_monster.monster_env, "make_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(
+        eval_monster.monster_env,
+        "evaluate",
+        lambda env, policy, tasks: {
+            "win_rate": 0.0,
+            "loss_rate": 0.0,
+            "timeout_rate": 1.0,
+            "mean_time_to_first_damage": float("nan"),
+            "mean_time_to_kill": float("nan"),
+        },
+    )
+    eval_monster.run_map(
+        "e1m1",
+        monster_env.PlayerOpponent("shooter"),
+        "stock",
+        None,
+        1,
+        0,
+        monster="monster_dog",
+    )
+    assert seen["monster"] == "monster_dog"
+
+
+DOG_EPISODE = """
+import json
+import numpy as np
+from deepquake import monster, monster_env, sim
+
+sim.init()
+env = monster_env.MonsterEnv(
+    "e1m1", seed=3, monster="monster_dog",
+    opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
+)
+obs = env.set_task(*(monster_env.make_tasks(env, 1, 77)[0]))
+entity = env._monster_entity()
+print(json.dumps({
+    "shape": list(obs.shape),
+    "type": [float(v) for v in obs[monster.MONSTER_OBS_BASE_DIM:]],
+    "classname": entity.classname,
+    "index": env.monster_index,
+}))
+"""
+
+
+@pytest.mark.gamedata
+def test_the_dog_gets_its_own_type_input():
+    """A Dog episode is hooked and its observation carries the Dog one-hot (#48)."""
+    require_gamedata()
+    out = run_in_subprocess(DOG_EPISODE, timeout=300)
+    assert out["classname"] == "monster_dog"
+    assert out["shape"] == [monster.MONSTER_OBS_DIM]
+    assert out["type"] == [0.0, 1.0]
+
+
+MIXED_EPISODES = """
+import json
+from deepquake import monster_env, sim
+
+sim.init()
+env = monster_env.MonsterEnv(
+    "e1m1", seed=4, monsters=("monster_army", "monster_dog"),
+    opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
+)
+seen = []
+for _ in range(6):
+    env.reset()
+    seen.append(env.monster)
+print(json.dumps(seen))
+"""
+
+
+@pytest.mark.gamedata
+def test_a_shared_run_samples_both_types():
+    """Training samples the body per episode, so one network sees both (#48)."""
+    require_gamedata()
+    seen = run_in_subprocess(MIXED_EPISODES, timeout=600)
+    assert set(seen) == {"monster_army", "monster_dog"}
 
 
 MONSTER_EPISODE = """

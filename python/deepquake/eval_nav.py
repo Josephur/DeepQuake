@@ -86,8 +86,9 @@ class TrainedPolicy:
         import torch
 
         with torch.no_grad():
-            self.hidden = self.model.advance(torch.as_tensor(obs).unsqueeze(0), self.hidden)
-            dists = self.model.distributions(self.hidden)
+            obs_t = torch.as_tensor(obs).unsqueeze(0)
+            self.hidden = self.model.advance(obs_t, self.hidden)
+            dists = self.model.distributions(self.hidden, obs_t)
             return np.array(
                 [torch.multinomial(d.probs[0], 1, generator=self.generator).item() for d in dists]
             )
