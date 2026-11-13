@@ -19,9 +19,30 @@ from upstream's `Quake/` directory:
   loading and collision hulls), `mathlib.c`, `zone.c`, `strlcat.c`,
   `strlcpy.c`.
 - **Headers:** only those the files above include, plus `progdefs.q1`.
+- **Client side (added 2026-11-12, #42, same commit):** everything the
+  playable client needs, still from upstream's `Quake/` directory at the
+  commit above — client game logic (`cl_*.c`, `view.c`, `keys.c`,
+  `chase.c`), renderer (`gl_*.c`, `r_*.c`, `gl_vidsdl.c`, `image.c`),
+  UI (`console.c`, `menu.c`, `sbar.c`), sound core (`snd_dma.c`,
+  `snd_mix.c`, `snd_mem.c`, `snd_codec.c`, `snd_wave.c`, `snd_sdl.c`,
+  `bgmusic.c`), networking (`net_main.c`, `net_dgrm.c`, `net_loop.c`,
+  `net_udp.c`, `net_bsd.c`), platform (`main_sdl.c`, `sys_sdl_unix.c`,
+  `in_sdl.c`, `cd_sdl.c` — which includes `cd_null.c` under SDL2 —
+  `cfgfile.c`, `pl_linux.c`, `wad.c`), the bundled libraries `miniz.c`
+  and `lodepng.c`, and their headers (`glquake.h`, `anorms.h`,
+  `anorm_dots.h`, `gl_warp_sin.h`, `qs_bmp.h`, `stb_image_write.h`,
+  `cfgfile.h`, `lodepng.h`, `net_dgrm.h`, `net_loop.h`, `net_udp.h`,
+  `snd_codec.h`, `snd_codeci.h`, `snd_wave.h`, the codec headers
+  `snd_codec.c` includes unconditionally (`snd_flac.h`, `snd_mikmod.h`,
+  `snd_modplug.h`, `snd_mp3.h`, `snd_opus.h`, `snd_umx.h`,
+  `snd_vorbis.h`, `snd_xmp.h`), and `resource.h` (the icon declarations
+  `gl_vidsdl.c` includes).
 
-Not vendored: renderer, sound, input, menus, networking drivers, platform
-code, bundled libraries, and build files for other platforms.
+Not vendored: the optional music codec backends (snd_flac/mp3/mikmod/
+modplug/mpg123/opus/umx/vorbis/xmp — each needs a system library),
+Windows and mac platform files (sys_sdl_win.c, pl_win.c, pl_osx.m,
+net_win.c, net_wins.c, net_wipx.c, wsaerror.h, resource.h), and
+upstream's build files.
 
 ## How it is built
 
