@@ -128,6 +128,52 @@ def test_the_download_tool_installs_a_shared_model_and_checks_every_file(tmp_pat
         )
 
 
+def _player_files_and_manifest() -> tuple[dict[str, bytes], dict]:
+    files = {"player.onnx": b"player graph", "player.onnx.nvec": b"3 3 7 2 2 3\n"}
+    manifest = {
+        "format_version": 2,
+        "name": "player",
+        "source_run": "combat_grunt_fightstart",
+        "total_steps": 1,
+        "obs_dim": 108,
+        "action_nvec": [3, 3, 7, 2, 2, 3],
+        "onnx_sha256": hashlib.sha256(files["player.onnx"]).hexdigest(),
+        "sidecar_sha256": hashlib.sha256(files["player.onnx.nvec"]).hexdigest(),
+    }
+    return files, manifest
+
+
+def test_the_download_tool_installs_a_format_2_model_without_a_class_map(tmp_path):
+    """release_model writes no class map for a player model, so a format 2
+    manifest without ``monsters`` must install (models-v2's player, #48)."""
+    tool = _download_tool()
+    files, manifest = _player_files_and_manifest()
+    tool.install_archive(_asset(files, manifest), "player", tmp_path)
+    assert (tmp_path / "player" / "player.onnx").read_bytes() == files["player.onnx"]
+    assert not (tmp_path / "player" / "player.onnx.monsters").exists()
+
+
+def test_the_download_tool_refuses_a_class_map_it_cannot_verify(tmp_path):
+    """A class map routes monsters to type indices, so it is installed only
+    with a checksum, and a manifest that names classes needs the file."""
+    tool = _download_tool()
+    files, manifest = _player_files_and_manifest()
+    stray = dict(files, **{"player.onnx.monsters": b"monster_army 0\n"})
+    with pytest.raises(SystemExit, match="no checksum"):
+        tool.install_archive(_asset(stray, manifest), "player", tmp_path / "a")
+
+    roster = {
+        "roster.onnx": b"the graph",
+        "roster.onnx.nvec": b"3 3 7 2\n",
+        "roster.onnx.monsters": b"monster_army 0\nmonster_dog 1\n",
+    }
+    named = _manifest_for(roster)
+    del roster["roster.onnx.monsters"]
+    with pytest.raises(SystemExit, match="missing roster.onnx.monsters"):
+        tool.install_archive(_asset(roster, named), "roster", tmp_path / "b")
+    assert not (tmp_path / "a").exists() and not (tmp_path / "b").exists()
+
+
 def test_the_download_tool_still_accepts_a_v1_manifest(tmp_path):
     """models-v1 stays installable: format 1 has no class map (#48)."""
     tool = _download_tool()

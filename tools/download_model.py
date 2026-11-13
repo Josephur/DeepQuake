@@ -6,10 +6,12 @@
 
 Fetches the release asset ``<name>.zip`` (model, layout sidecars, manifest),
 verifies every checksum in the manifest against the downloaded bytes, and
-installs the files under ``models/<name>/``. A format 2 manifest (#48) also
-carries the monster class map (``<name>.onnx.monsters``) and its checksum;
-a format 1 manifest (models-v1) has neither and still installs. Standard
-library only; GitHub API access needs no auth for public releases.
+installs the files under ``models/<name>/``. A format 2 manifest of a
+monster model (#48) also carries the class map (``<name>.onnx.monsters``)
+and its checksum; a player model's format 2 manifest and a format 1
+manifest (models-v1) have neither and still install. A class map without a
+checksum is refused. Standard library only; GitHub API access needs no auth
+for public releases.
 """
 
 from __future__ import annotations
@@ -56,8 +58,11 @@ def install_archive(data: bytes, name: str, models_dir: Path) -> Path:
             ("onnx_sha256", f"{name}.onnx"),
             ("sidecar_sha256", f"{name}.onnx.nvec"),
         ]
-        if version >= 2:
-            checksums.append(("monsters_sha256", f"{name}.onnx.monsters"))
+        class_map = f"{name}.onnx.monsters"
+        if "monsters_sha256" in manifest:
+            checksums.append(("monsters_sha256", class_map))
+        elif class_map in names:
+            raise SystemExit(f"the asset has {class_map} but the manifest has no checksum for it")
         for key, filename in checksums:
             if filename not in names:
                 raise SystemExit(f"the asset is missing {filename}")
