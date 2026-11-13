@@ -188,13 +188,15 @@ attack animation, the function the spawn built-in assigns to the monster's
 `th_melee` field and the stock AI runs when it decides to attack: the
 Grunt's `army_atk1` (chained to `army_fire`) and the Dog's `dog_atta1`, a
 lunge whose chain bites from `dog_bite`. It is found by name — `<prefix>atk1`,
-then `<prefix>atta1`, `attack`, `melee1`. `<Class>CheckAttack` is *not* an
+then `<prefix>atta1`, `attack`, `melee1`, and the other shapes the stock
+classes use (see below). `<Class>CheckAttack` is *not* an
 entry: it is the AI's range classifier, it reads the global `enemy_range`
 that only the stock AI sets, and it starts nothing. Because the bite, not
 the hook, is what checks the range, a policy that attacks can make the Dog
 lunge across a room, but damage lands only at contact distance (measured:
 4 bites in 3 s from 50 units, first after 0.4 s, 7-21 damage each; from
-300 units the dog charges to 73 and lands its first bite there). The simulator loads an
+300 units the dog charges to 73 and lands its first bite there).
+The simulator loads an
 optional game directory (`dqsim_config.game`, #37), and the progs gate
 compares the level's loaded `progs.dat` against the stock identity read
 from id1 at start-up (`dqsim_progs_is_stock`). With no nomination the
@@ -202,6 +204,43 @@ simulation is bit-identical (the fidelity test guards this); the
 nomination refuses non-monsters and, per the gate above, a non-stock
 progs. Turning observations into the fair-senses monster observation of
 section 3 is #33, and training a policy on this hook is #35.
+
+**Any class, not just the Grunt and the Dog (#49).** A class does not
+necessarily name its QuakeC functions after itself: in the stock id1 program
+the Enforcer's states are `enf_stand1`, `enf_run1` and `enf_atk1`, the
+Shambler's are `sham_*`, the Hell Knight's `hknight_*`, the Tarbaby's
+`tbaby_*`, the Wizard's `wiz_*`, the Shalrath's `shal_*` and the Fish's
+`f_*`, while the Grunt's are `army_*`, the Dog's `dog_*`, the Knight's
+`knight_*`, the Demon's `demon1_*` and the Zombie's `zombie_*`. So the hook
+does not derive a prefix from the classname. It reads the class's prefix off
+the monster's own decision think — `<prefix>_stand<n>`, `<prefix>_walk<n>`
+or `<prefix>_run<n>`, the states the stock AI schedules — and resolves
+everything else from it: the stand and run frames it animates with, the
+attack entry and the shot. Every class that stocks an id1 map has that
+frame pattern except `monster_oldone` and `monster_boss`, whose states are
+`idle`/`thrash` and `idle`/`shock` instead. No class names are in the code.
+
+The attack entry is found by shape, since the classes disagree on it: `atk1`
+(the Grunt's `army_atk1`, the Enforcer's `enf_atk1`), `atta1` (the Dog's
+`dog_atta1`), `attack`, `attack1` (the Shalrath's `shal_attack1`), `melee`
+(the Ogre's `ogre_melee`) and `melee1`. The shot is found from what the
+attack chain calls, because the shot is not always named after the class
+either: the Grunt's is `army_fire`, the Enforcer's `enforcer_fire`, and a
+function whose name ends in `fire` or `shot` is one. Measured on the local
+game data, before and after: the Enforcer went from 0 hook calls in 72
+ticks (the stock AI kept playing it) to 67, and from no damage under the
+policy to 45; the Ogre went from 149 calls and no damage to 65 calls and 30
+damage. The Grunt, Dog, Knight, Demon and Zombie are unchanged.
+
+**The aim error covers every shot of an attack (#49).** The error is rolled
+once, when the policy asks for the attack, and applied where the shot is
+aimed — the enemy's origin, from the firing frame. A class whose chain
+fires more than once (the Enforcer fires at `enf_atk6` and again at
+`enf_atk10`) would otherwise keep an exact second shot, and its difficulty
+would not scale with `skill`. The error therefore stays pending until the
+monster decides again, and every frame that fires is offset. Measured: with
+the aim error overridden to 45 degrees the Enforcer's shots all miss (0
+damage in 3 s), and with no error the same shot hits.
 
 **A whole level at once (#46, M6).** The hook keeps a fixed table of 64
 nominations, each with its own callback, user pointer, QuakeC names, animation

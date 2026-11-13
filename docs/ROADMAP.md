@@ -298,6 +298,24 @@ decisions, and the outcome rates are asserted to fill exactly 100%.
 - [ ] Group coordination between monsters
 - [ ] Style settings exposed as cvars; difficulty handicaps tuned per monster type (difficulty itself follows `skill` from M4, see ARCHITECTURE.md)
 
+The hook reaches any stock class (2026-11-13, #49): a class does not name
+its QuakeC functions after itself — the Enforcer's states are `enf_stand1`,
+`enf_run1`, `enf_atk1`, the Shambler's are `sham_*`, the Hell Knight's
+`hknight_*` — so the hook reads the prefix off the monster's own decision
+think instead of deriving one from the classname, and finds the attack entry
+by shape (`ogre_melee`, `shal_attack1`) and the shot from what the attack
+chain calls (`enforcer_fire`, not `enf_fire`). Measured on the local game
+data: the Enforcer went from 0 hook calls in 72 ticks and no damage under
+the policy to 67 calls and 45 damage, the Ogre from no damage to 30; the
+Grunt, Dog, Knight, Demon and Zombie are unchanged. The aim error now
+covers every shot of an attack, so a class that fires twice (the Enforcer)
+is handicapped on both shots instead of keeping an exact second one.
+
+The **Remaining monster types** item is **not** ticked: the Enforcer's hook
+path is proved, but it has not joined the shared model yet — that is the
+next issue (three types, one network, release `models-v3`), and the item
+covers every remaining type.
+
 Shared model, second type (2026-11-13, #48: `configs/roster_pool.toml`,
 one network for the Grunt and the Dog, type one-hot appended to the
 observation, a policy head per type; warm-started from `grunt_pool` and

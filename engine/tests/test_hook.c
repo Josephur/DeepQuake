@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The brain hook (#31) on a real map: a scripted policy drives one Grunt
- * (move, then attack the player it can see), deterministically. Needs game
- * data: pass the directory containing id1/ as the first argument. Exits
- * with 77 (skipped) when that directory has no id1/pak0.pak.
+ * (move, then attack the player it can see), deterministically. The Dog
+ * (#47) and the Enforcer and the Ogre (#49) are driven by the same code:
+ * the hook must find each class's own QuakeC functions, whatever they are
+ * called. Needs game data: pass the directory containing id1/ as the first
+ * argument. Exits with 77 (skipped) when that directory has no id1/pak0.pak.
  */
 #include <inttypes.h>
 #include <math.h>
@@ -229,30 +231,34 @@ static uint64_t multi_scenario(void)
  *
  * Each scenario loads the map itself: a dog left in the middle of its bite
  * chain is not asked for decisions, so its observation is stale until the
- * chain returns to a stand state. */
-static int dog_mode; /* 0 idle, 1 forward, 2 turn, 3 attack the player */
-static int dog_calls;
-static int dog_saw_player;
-static float dog_yaw;
-static float dog_origin[3];
-static float dog_turn_to;
+ * chain returns to a stand state.
+ *
+ * The same machinery drives any stock class (#49): the state below belongs to
+ * "the monster under test", whatever its class. */
+static int driven_mode; /* 0 idle, 1 forward, 2 turn, 3 attack the player */
+static int driven_calls;
+static int driven_saw_player;
+static float driven_yaw;
+static float driven_origin[3];
+static float driven_turn_to;
 
-static void dog_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action, void *user)
+static void driven_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action,
+                          void *user)
 {
     (void)user;
-    dog_calls++;
-    memcpy(dog_origin, obs->origin, sizeof(dog_origin));
-    dog_yaw = obs->angles[1];
-    dog_saw_player = 0;
+    driven_calls++;
+    memcpy(driven_origin, obs->origin, sizeof(driven_origin));
+    driven_yaw = obs->angles[1];
+    driven_saw_player = 0;
     for (int i = 0; i < obs->visible_count; i++)
         if (obs->visible[i].flags & 8) /* FL_CLIENT */
-            dog_saw_player = 1;
+            driven_saw_player = 1;
     action->desired_yaw = obs->angles[1];
-    if (dog_mode == 1) {
+    if (driven_mode == 1) {
         action->forward = 200.0f;
-    } else if (dog_mode == 2) {
-        action->desired_yaw = dog_turn_to;
-    } else if (dog_mode == 3) {
+    } else if (driven_mode == 2) {
+        action->desired_yaw = driven_turn_to;
+    } else if (driven_mode == 3) {
         for (int i = 0; i < obs->visible_count; i++) {
             if (obs->visible[i].flags & 8) { /* FL_CLIENT */
                 action->desired_yaw =
@@ -276,7 +282,9 @@ static void frozen_policy(const dqsim_hook_observation *obs, dqsim_hook_action *
 
 /* Nominate every monster but `keep` with frozen_policy: the other monsters
  * of a live map would otherwise shoot the standing player and be counted as
- * the dog's damage. */
+ * the driven monster's damage. */
+static int frozen_monsters;
+
 static int freeze_monsters_except(int keep)
 {
     static dqsim_entity entities[2048];
@@ -289,20 +297,22 @@ static int freeze_monsters_except(int keep)
               "freeze entity %d: %s", entities[i].index, dqsim_last_error());
         frozen++;
     }
+    frozen_monsters = frozen;
     return frozen;
 }
 
-/* The dog with the least clutter around it: the observation reports only the
- * six nearest entities (deepquake.monster), so a dog standing among items
- * would not see a player standing near them, and the hook would find no
- * target for the bite. */
-static int choose_dog(dqsim_entity *entities, int count, const float *player)
+/* The class member with the least clutter around it: the observation reports
+ * only the six nearest entities (deepquake.monster), so a monster standing
+ * among items would not see a player standing near them, and the hook would
+ * find no target for the attack. */
+static int choose_class(dqsim_entity *entities, int count, const char *classname,
+                        const float *player)
 {
     int best = -1;
     int best_clutter = 1 << 30;
     float best_distance = 1e30f;
     for (int i = 0; i < count; i++) {
-        if (strcmp(entities[i].classname, "monster_dog") != 0)
+        if (strcmp(entities[i].classname, classname) != 0)
             continue;
         int clutter = 0;
         for (int j = 0; j < count; j++) {
@@ -341,14 +351,14 @@ static int place_player_visible(float distance)
 {
     const dqsim_action idle = {0};
     for (int k = 0; k < 24; k++) {
-        if (!place_player_ahead(dog_origin, dog_yaw + (float)(k * 15), distance))
+        if (!place_player_ahead(driven_origin, driven_yaw + (float)(k * 15), distance))
             continue;
-        dog_mode = 3;
+        driven_mode = 3;
         for (int tick = 0; tick < 24; tick++) {
-            dog_saw_player = 0;
+            driven_saw_player = 0;
             if (dqsim_step_repeat(&idle, 1) != DQSIM_OK)
                 return 0;
-            if (dog_saw_player)
+            if (driven_saw_player)
                 return 1;
         }
     }
@@ -361,30 +371,33 @@ static float flat_distance(const float a[3], const float b[3])
     return sqrtf(dx * dx + dy * dy);
 }
 
-/* Load, find the clearest dog, nominate it, freeze every other monster, and
- * let one second pass so the dog's own facing and origin are known. */
-static int dog_start(int *dog_index)
+/* Load, find the clearest monster of `classname`, nominate it, freeze every
+ * other monster, and let one second pass so the driven monster's own facing
+ * and origin are known. The class may name its QuakeC functions differently
+ * from its classname (#49): the hook has to find them either way. */
+static int driven_start(const char *map, const char *classname, int *index)
 {
     dqsim_player_state player;
     static dqsim_entity entities[2048];
     const dqsim_action idle = {0};
 
-    CHECK(dqsim_load_map("e1m1", 2, 23) == DQSIM_OK, "load e1m1");
+    CHECK(dqsim_load_map(map, 2, 23) == DQSIM_OK, "load %s", map);
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "get player");
     int count = dqsim_get_entities(entities, 2048);
     CHECK(count > 0, "get entities");
-    int dog = choose_dog(entities, count, player.origin);
-    CHECK(dog >= 0, "no monster_dog on e1m1");
-    *dog_index = entities[dog].index;
-    dog_calls = 0;
-    dog_mode = 0;
-    CHECK(dqsim_set_policy_hook(*dog_index, dog_policy, NULL) == DQSIM_OK,
-          "nominate dog: %s", dqsim_last_error());
-    CHECK(freeze_monsters_except(*dog_index) >= 8, "fewer than 8 other monsters to freeze");
-    /* dog_stand1 / dog_run1 / dog_walk1 are decision thinks, so the policy is
-     * asked for decisions like the Grunt's. */
-    CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "dog settle");
-    CHECK(dog_calls > 10, "the dog was asked for %d decisions in 1 s", dog_calls);
+    int chosen = choose_class(entities, count, classname, player.origin);
+    CHECK(chosen >= 0, "no %s on %s", classname, map);
+    *index = entities[chosen].index;
+    driven_calls = 0;
+    driven_mode = 0;
+    CHECK(dqsim_set_policy_hook(*index, driven_policy, NULL) == DQSIM_OK,
+          "nominate %s: %s", classname, dqsim_last_error());
+    CHECK(freeze_monsters_except(*index) >= 8, "only %d other monsters to freeze on %s",
+          frozen_monsters, map);
+    /* "<prefix>_stand1" / "<prefix>_run1" / "<prefix>_walk1" are decision
+     * thinks, so the policy is asked for decisions like the Grunt's. */
+    CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "%s settle", classname);
+    CHECK(driven_calls > 10, "the %s was asked for %d decisions in 1 s", classname, driven_calls);
     return 0;
 }
 
@@ -395,12 +408,12 @@ static int dog_drive(void)
     static dqsim_entity entities[2048];
     const dqsim_action idle = {0};
     int dog_index;
-    if (dog_start(&dog_index))
+    if (driven_start("e1m1", "monster_dog", &dog_index))
         return 1;
 
     float start[3];
-    memcpy(start, dog_origin, sizeof(start));
-    dog_mode = 1;
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1;
     CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "dog forward");
     int count = dqsim_get_entities(entities, 2048);
     int found = 0;
@@ -416,11 +429,11 @@ static int dog_drive(void)
     CHECK(found, "the dog vanished");
     CHECK(sqrtf(moved) > 20.0f, "the dog moved %.1f units in 2 s", sqrtf(moved));
 
-    float before_turn = dog_yaw;
-    dog_turn_to = dog_yaw + 90.0f;
-    dog_mode = 2;
+    float before_turn = driven_yaw;
+    driven_turn_to = driven_yaw + 90.0f;
+    driven_mode = 2;
     CHECK(dqsim_step_repeat(&idle, 36) == DQSIM_OK, "dog turn");
-    float turned = fabsf(remainderf(dog_yaw - before_turn, 360.0f));
+    float turned = fabsf(remainderf(driven_yaw - before_turn, 360.0f));
     CHECK(turned > 45.0f, "the dog turned %.1f of the 90 degrees asked", turned);
     printf("dog: moved %.0f units in 2 s, turned %.0f degrees\n", sqrtf(moved), turned);
     CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
@@ -435,7 +448,7 @@ static int dog_bite(void)
     dqsim_player_state player;
     const dqsim_action idle = {0};
     int dog_index;
-    if (dog_start(&dog_index))
+    if (driven_start("e1m1", "monster_dog", &dog_index))
         return 1;
     CHECK(place_player_visible(50.0f), "no free spot in the dog's sight at bite range");
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at bite range");
@@ -444,7 +457,7 @@ static int dog_bite(void)
     float last = health;
     float biggest = 0;
     int bites = 0, first_tick = -1;
-    dog_mode = 3;
+    driven_mode = 3;
     for (int tick = 0; tick < 72 * 3 && player.health > 10.0f; tick++) {
         CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "bite steps");
         CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the bites");
@@ -477,11 +490,11 @@ static int dog_range(void)
     dqsim_player_state player;
     const dqsim_action idle = {0};
     int dog_index;
-    if (dog_start(&dog_index))
+    if (driven_start("e1m1", "monster_dog", &dog_index))
         return 1;
     CHECK(place_player_visible(300.0f), "no free spot in the dog's sight 300 units away");
     float start[3];
-    memcpy(start, dog_origin, sizeof(start));
+    memcpy(start, driven_origin, sizeof(start));
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "player far away");
     float far[3];
     memcpy(far, player.origin, sizeof(far));
@@ -489,11 +502,11 @@ static int dog_range(void)
 
     float first_damage_distance = -1.0f;
     float closest = -1.0f;
-    dog_mode = 3;
+    driven_mode = 3;
     for (int tick = 0; tick < 72 * 4 && first_damage_distance < 0.0f; tick++) {
         CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "charge steps");
         CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the charge");
-        float now = flat_distance(dog_origin, player.origin);
+        float now = flat_distance(driven_origin, player.origin);
         if (closest < 0.0f || now < closest)
             closest = now;
         if (player.health < health - 0.5f)
@@ -506,6 +519,152 @@ static int dog_range(void)
     CHECK(first_damage_distance < 100.0f,
           "the first damage landed %.0f units away: the bite is not contact-range",
           first_damage_distance);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* Another stock class, driven by the same hook (#49). The Enforcer's QuakeC
+ * functions are named "enf_...", not "monster_enforcer_...", so the hook has
+ * to find the class's own prefix instead of deriving one from the classname.
+ * Its attack entry is "enf_atk1" and its shot "enforcer_fire", which is not
+ * "<prefix>fire" either. */
+static int enforcer_drive(void)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m1", "monster_enforcer", &index))
+        return 1;
+
+    float start[3];
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1;
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "enforcer forward");
+    int count = dqsim_get_entities(entities, 2048);
+    int found = 0;
+    float moved = 0;
+    for (int i = 0; i < count; i++)
+        if (entities[i].index == index) {
+            found = 1;
+            for (int k = 0; k < 2; k++) {
+                float delta = entities[i].origin[k] - start[k];
+                moved += delta * delta;
+            }
+        }
+    CHECK(found, "the enforcer vanished");
+    CHECK(sqrtf(moved) > 20.0f, "the enforcer moved %.1f units in 2 s", sqrtf(moved));
+    printf("enforcer: moved %.0f units in 2 s\n", sqrtf(moved));
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The policy asks for an attack and the class's own attack chain lands the
+ * damage: "enf_atk1" leads to "enf_atk6", which fires the laser from
+ * "enforcer_fire". The Enforcer must not hit the player on every tick - the
+ * QuakeC chain sets the pace. */
+static int enforcer_attack(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m1", "monster_enforcer", &index))
+        return 1;
+    CHECK(place_player_visible(100.0f), "no free spot in the enforcer's sight at 100 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    float biggest = 0;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 4 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "attack steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the attack");
+        float drop = health - player.health;
+        if (drop > 0.5f) {
+            hits++;
+            if (drop > biggest)
+                biggest = drop;
+        }
+        health = player.health;
+    }
+    printf("enforcer: %d hits in 4 s at 100 units, biggest %.0f, health %.0f -> %.0f\n", hits,
+           biggest, before, player.health);
+    CHECK(hits > 0, "the enforcer never damaged the player: its attack chain does not reach "
+                    "enforcer_fire");
+    CHECK(hits <= 8, "the enforcer hit the player %d times in 4 s: the chain is not gating", hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The aim error has to land where the shot is aimed. The Enforcer's shot
+ * function is "enforcer_fire" while its prefix is "enf_", so the hook finds
+ * it from the attack entry's own call: with a 45 degree aim error the laser
+ * goes wide, and with no error the same shot hits. */
+static int enforcer_aim_error(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m1", "monster_enforcer", &index))
+        return 1;
+    CHECK(place_player_visible(100.0f), "no free spot in the enforcer's sight at 100 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+    float before = player.health;
+
+    CHECK(dqsim_set_handicap_override(0, 45.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 3; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "aim error steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the aim error");
+    }
+    float missed = before - player.health;
+    printf("enforcer: %.0f damage with a 45 degree aim error\n", missed);
+    CHECK(missed < 5.0f, "the enforcer did %.0f damage with a 45 degree aim error", missed);
+
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override off");
+    float health = player.health;
+    int hits = 0;
+    for (int tick = 0; tick < 72 * 3 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "clean shot steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the clean shot");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("enforcer: %d hits with no aim error\n", hits);
+    CHECK(hits > 0, "the enforcer never hit the player without an aim error");
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The Ogre's attack entry is "ogre_melee", a name the hook's probe list did
+ * not have (#49): the Ogre was driven but its attack bit did nothing. */
+static int ogre_attack(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m4", "monster_ogre", &index))
+        return 1;
+    CHECK(place_player_visible(60.0f), "no free spot in the ogre's sight at 60 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 4 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "attack steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the attack");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("ogre: %d hits in 4 s at 60 units, health %.0f -> %.0f\n", hits, before,
+           player.health);
+    CHECK(hits > 0, "the ogre never damaged the player: its attack entry was not found");
     CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
     return 0;
 }
@@ -546,6 +705,9 @@ int main(int argc, char **argv)
     CHECK(multi_first == multi_second, "many monsters: same seed and inputs gave different hashes");
 
     if (dog_drive() || dog_bite() || dog_range())
+        return 1;
+
+    if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

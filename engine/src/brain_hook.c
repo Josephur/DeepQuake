@@ -29,12 +29,17 @@
  * its own animation clock. Slots fill in order from dq_brain_hook_nominate
  * and empty on release, clear, and every level start. A fixed table, so
  * nominating never allocates and never fails for want of memory. */
+#define DQ_MAX_FIRE_THINKS 4
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
     void *user;
     char prefix[32]; /* QuakeC state prefix, e.g. "army_" */
-    func_t fire_think; /* the attack-sequence think that fires, 0 = none */
+    /* The attack-sequence frames that fire the shot (the Grunt's "army_atk5",
+     * the Enforcer's "enf_atk6" and "enf_atk10"): the aim error acts there.
+     * Empty for a melee monster, which has nothing to aim off. */
+    func_t fire_thinks[DQ_MAX_FIRE_THINKS];
+    int fire_count;
     func_t attack_think; /* the function that starts an attack, 0 = none */
     float stand_frame, run_frame;
     int run_frames;
@@ -44,6 +49,14 @@ typedef struct dq_hook_slot {
 } dq_hook_slot;
 
 static dq_hook_slot hook_slots[DQ_BRAIN_MAX_MONSTERS];
+
+/* Resolve a class's QuakeC functions from its prefix: the stand and run
+ * frames, the attack entry and the shot. Defined below, next to the
+ * lookups it uses. */
+static int resolve_prefix(dq_hook_slot *slot, const char *prefix);
+
+/* The class prefix of a decision think's name ("enf_stand1" -> "enf_"). */
+static int decision_think_prefix(const char *name, char *out, size_t size);
 /* Overrides are per process, not per monster: the simulator drives one
  * monster and its tests set the schedule for it. */
 static int hook_override_ticks = -1;   /* -1: use the schedule */
@@ -307,17 +320,34 @@ static func_t find_function(const char *name)
     return 0;
 }
 
-/* The attack-sequence think that actually fires: the "<prefix>atkN" state
- * function whose statements call "<prefix>fire" (#34). 0 when there is
- * none (a melee monster), in which case aim error has nothing to act on. */
-static func_t find_fire_think(const char *prefix)
+/* The attack-sequence frames that actually fire: the "<prefix>atkN" state
+ * functions whose statements call the class's shot function. A class can
+ * fire more than once per attack (the Enforcer's chain fires at "enf_atk6"
+ * and at "enf_atk10"), and every shot of the attack has to be handicapped,
+ * so all of them are kept. None for a melee monster, which has nothing to
+ * aim off.
+ *
+ * The shot is not always named after the class: the Grunt's is "army_fire"
+ * and the Enforcer's "enforcer_fire", while the Enforcer's prefix is "enf_".
+ * So the shot is found by what the attack chain calls, not by its name: a
+ * function whose name ends in "fire" or "shot" fires one. "SUB_CheckRefire"
+ * does not end in either, and is not a shot. */
+static int is_shot_function(const char *name)
+{
+    size_t length = strlen(name);
+    if (length >= 4 && strcmp(name + length - 4, "fire") == 0)
+        return 1;
+    if (length >= 4 && strcmp(name + length - 4, "shot") == 0)
+        return 1;
+    return 0;
+}
+
+static int find_fire_thinks(const char *prefix, func_t *out, int max)
 {
     char name[40];
-    q_snprintf(name, sizeof(name), "%sfire", prefix);
-    func_t fire = find_function(name);
-    if (!fire)
-        return 0;
-    for (int n = 1; n <= 24; n++) {
+    int count = 0;
+
+    for (int n = 1; n <= 24 && count < max; n++) {
         q_snprintf(name, sizeof(name), "%satk%d", prefix, n);
         func_t candidate = find_function(name);
         if (!candidate)
@@ -330,11 +360,23 @@ static func_t find_fire_think(const char *prefix)
             if (statement->op >= OP_CALL0 && statement->op <= OP_CALL8) {
                 func_t called;
                 memcpy(&called, &pr_globals[statement->a], sizeof(called));
-                if (called == fire)
-                    return candidate;
+                if (called > 0 && called < progs->numfunctions &&
+                    is_shot_function(PR_GetString(pr_functions[called].s_name))) {
+                    out[count++] = candidate;
+                    break;
+                }
             }
         }
     }
+    return count;
+}
+
+/* Is this think one of the frames that fires the shot? */
+static int is_fire_think(const dq_hook_slot *slot, func_t fnum)
+{
+    for (int i = 0; i < slot->fire_count; i++)
+        if (slot->fire_thinks[i] == fnum)
+            return 1;
     return 0;
 }
 
@@ -349,18 +391,23 @@ static float state_frame(func_t fnum)
     return pr_globals[statement->a];
 }
 
-static int is_decision_think(func_t fnum, const char *prefix)
+/* Is this think one of the monster's own decision states? The class's
+ * prefix is not always its classname (#49): the Enforcer's states are
+ * "enf_stand1" and friends, not "monster_enforcer_stand1". The first
+ * decision think of a class teaches the hook its prefix; the ones after it
+ * must match, so a think from anywhere else is left to QuakeC. */
+static int is_decision_think(func_t fnum, dq_hook_slot *slot)
 {
-    const char *name = PR_GetString(pr_functions[fnum].s_name);
-    size_t length_prefix = strlen(prefix);
-    if (strncmp(name, prefix, length_prefix) != 0)
+    char prefix[32];
+
+    if (!decision_think_prefix(PR_GetString(pr_functions[fnum].s_name), prefix, sizeof(prefix)))
         return 0;
-    const char *rest = name + length_prefix;
-    if (strncmp(rest, "stand", 5) != 0 && strncmp(rest, "walk", 4) != 0 &&
-        strncmp(rest, "run", 3) != 0)
-        return 0;
-    size_t length = strlen(name);
-    return length > 0 && name[length - 1] >= '0' && name[length - 1] <= '9';
+    if (strcmp(prefix, slot->prefix) != 0) {
+        /* The class names its states differently: resolve them again. */
+        if (!resolve_prefix(slot, prefix))
+            return 0;
+    }
+    return 1;
 }
 
 static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation *obs)
@@ -550,8 +597,11 @@ void dqsim_hook_execute_program(func_t fnum)
         if (!ent->free && pr_global_struct->self == EDICT_TO_PROG(ent)) {
             /* The pending aim error acts where the shot is actually aimed:
              * the fire think reads the enemy's origin, so offset that
-             * origin tangentially for this one execution and restore it. */
-            if (slot->handicap.aim_pending && fnum == slot->fire_think && ent->v.enemy) {
+             * origin tangentially for this one execution and restore it.
+             * It stays pending for the rest of the attack: a class whose
+             * chain fires more than once (the Enforcer fires twice) would
+             * otherwise keep an exact second shot (#49). */
+            if (slot->handicap.aim_pending && is_fire_think(slot, fnum) && ent->v.enemy) {
                 edict_t *enemy = PROG_TO_EDICT(ent->v.enemy);
                 vec3_t saved, delta;
                 VectorCopy(enemy->v.origin, saved);
@@ -565,13 +615,16 @@ void dqsim_hook_execute_program(func_t fnum)
                     enemy->v.origin[2] += distance * tanf(slot->handicap.aim_pitch_deg *
                                                           3.14159265f / 180.0f);
                 }
-                slot->handicap.aim_pending = 0;
                 PR_ExecuteProgram(fnum);
                 VectorCopy(saved, enemy->v.origin);
                 return;
             }
             if (ent->v.health > 0 && (func_t)ent->v.think == fnum && ent->v.nextthink == 0 &&
-                is_decision_think(fnum, slot->prefix)) {
+                is_decision_think(fnum, slot)) {
+                /* The monster is deciding again: the attack it was in is
+                 * over, so the aim error of that attack does not carry into
+                 * the next one. */
+                slot->handicap.aim_pending = 0;
                 dqsim_hook_observation obs;
                 hook_observe(slot->entity_index, ent, &obs);
                 int visible_enemy = -1;
@@ -614,10 +667,12 @@ void dqsim_hook_execute_program(func_t fnum)
  * "<class>CheckAttack" is *not* that function: it is the AI's range
  * classifier, it reads the global "enemy_range" that only the stock AI
  * sets, and it starts nothing. A melee animation is under
- * "<prefix>atta1...", so try the known shapes in order. */
+ * "<prefix>atta1...", so try the known shapes in order. The Ogre's entry is
+ * "ogre_melee" and the Shalrath's "shal_attack1", so those shapes are here
+ * too (#49). */
 static func_t find_attack_think(const char *prefix)
 {
-    static const char *const names[] = {"atk1", "atta1", "attack", "melee1"};
+    static const char *const names[] = {"atk1", "atta1", "attack", "attack1", "melee", "melee1"};
     char name[40];
 
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
@@ -627,6 +682,72 @@ static func_t find_attack_think(const char *prefix)
             return found;
     }
     return 0;
+}
+
+/* The QuakeC prefix of a class's own state functions: the Grunt's is
+ * "army_", the Dog's "dog_", the Enforcer's "enf_", the Shambler's "sham_".
+ * It is not always the classname, so the hook reads it off the monster's own
+ * decision think ("<prefix>_stand<n>", "<prefix>_walk<n>", "<prefix>_run<n>")
+ * instead of assuming one. Writes the prefix, with its trailing
+ * underscore, and returns 1 when the name is such a think. */
+static int decision_think_prefix(const char *name, char *out, size_t size)
+{
+    static const char *const kinds[] = {"stand", "walk", "run"};
+    const char *underscore = strrchr(name, '_');
+
+    if (!underscore)
+        return 0;
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); i++) {
+        size_t length = strlen(kinds[i]);
+        if (strncmp(underscore + 1, kinds[i], length) != 0)
+            continue;
+        const char *digits = underscore + 1 + length;
+        if (!*digits)
+            return 0;
+        for (const char *digit = digits; *digit; digit++)
+            if (*digit < '0' || *digit > '9')
+                return 0;
+        size_t prefix_length = (size_t)(underscore - name) + 1;
+        if (prefix_length >= size)
+            return 0;
+        memcpy(out, name, prefix_length);
+        out[prefix_length] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+/* Resolve everything the hook needs from a class's QuakeC prefix: the stand
+ * and run frames it animates with, the function that starts an attack, and
+ * the attack-sequence function that fires the shot (the aim error acts
+ * there). The prefix is only kept when the class's frames are found, so a
+ * think that is not a class's own state cannot change it. */
+static int resolve_prefix(dq_hook_slot *slot, const char *prefix)
+{
+    char name[40];
+    float stand_frame, run_frame;
+    int run_frames = 0;
+
+    q_snprintf(name, sizeof(name), "%sstand1", prefix);
+    stand_frame = state_frame(find_function(name));
+    q_snprintf(name, sizeof(name), "%srun1", prefix);
+    run_frame = state_frame(find_function(name));
+    for (int i = 1; i <= 24; i++) {
+        q_snprintf(name, sizeof(name), "%srun%d", prefix, i);
+        if (!find_function(name))
+            break;
+        run_frames = i;
+    }
+    if (stand_frame < 0.0f && run_frame < 0.0f)
+        return 0; /* not a class with the usual frames: leave the slot alone */
+
+    q_strlcpy(slot->prefix, prefix, sizeof(slot->prefix));
+    slot->stand_frame = stand_frame;
+    slot->run_frame = run_frame;
+    slot->run_frames = run_frames > 0 ? run_frames : 1;
+    slot->attack_think = find_attack_think(slot->prefix);
+    slot->fire_count = find_fire_thinks(slot->prefix, slot->fire_thinks, DQ_MAX_FIRE_THINKS);
+    return 1;
 }
 
 const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callback, void *user)
@@ -662,23 +783,12 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
     slot->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
     hook_override_ticks = -1;
     hook_override_aim = -1.0f;
-    q_snprintf(slot->prefix, sizeof(slot->prefix), "%s_", classname + 8);
-    slot->fire_think = find_fire_think(slot->prefix);
-    slot->attack_think = find_attack_think(slot->prefix);
-    char name[40];
-    q_snprintf(name, sizeof(name), "%sstand1", slot->prefix);
-    slot->stand_frame = state_frame(find_function(name));
-    q_snprintf(name, sizeof(name), "%srun1", slot->prefix);
-    slot->run_frame = state_frame(find_function(name));
-    slot->run_frames = 0;
-    for (int i = 1; i <= 24; i++) {
-        q_snprintf(name, sizeof(name), "%srun%d", slot->prefix, i);
-        if (!find_function(name))
-            break;
-        slot->run_frames = i;
-    }
-    if (slot->run_frames == 0)
-        slot->run_frames = 1;
+    /* The class's own prefix is not always its classname (the Enforcer's
+     * states are "enf_..."), so the classname stem is only the first guess:
+     * the monster's own decision think settles it (#49). */
+    char class_prefix[32];
+    q_snprintf(class_prefix, sizeof(class_prefix), "%s_", classname + 8);
+    resolve_prefix(slot, class_prefix);
     return NULL;
 }
 
