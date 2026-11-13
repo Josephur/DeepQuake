@@ -289,8 +289,8 @@ decisions, and the outcome rates are asserted to fill exactly 100%.
 
 - [x] Playable client built from the same vendored engine (#42: the `deepquake` target; client sources vendored from the same upstream commit, no vendored-file edits)
 - [x] ONNX inference in the client (CUDA with CPU fallback) (#43: the shared brain hook drives one Grunt from the ONNX export; 78-87 microseconds per decision measured; batching per tick arrives with multi-monster, M6)
-- [ ] Stock AI fallback when no model is present
-- [ ] Model manifest, download tool, first public release
+- [x] Stock AI fallback when no model is present (#44: the fallback is hash-proven bit-identical to never nominating; corrupt and wrong-architecture models are refused with clear logs)
+- [x] Model manifest, download tool, first public release (#45: reproducible checksum manifests, `tools/download_model.py`, release `models-v1` published with the Grunt and player policies)
 
 ## M6 — Full roster
 
