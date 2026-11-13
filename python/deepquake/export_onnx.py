@@ -94,6 +94,18 @@ def export_onnx(checkpoint_path: Path, out_path: Path, *, samples: int = 64, see
         None,
         {"observation": batch, "hidden_in": hidden},
     )
+    # The client's layout sidecar: the action-head sizes, one line, then
+    # the turn grid the decision maps through (monster_env's, in degrees).
+    from . import monster_env
+
+    sidecar = Path(str(out_path) + ".nvec")
+    sidecar.write_text(
+        " ".join(str(n) for n in model.action_nvec)
+        + "\n"
+        + " ".join(f"{d:g}" for d in monster_env.MONSTER_TURN_DEGREES)
+        + "\n"
+    )
+
     deviation = float(np.max(np.abs(probs_onnx - probs_torch.numpy())))
     if deviation > 1e-5:
         raise RuntimeError(

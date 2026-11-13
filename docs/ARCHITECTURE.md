@@ -79,6 +79,22 @@ into both the headless library and the playable client, so training and play
 share physics by construction. Quake Enhanced (KEX) is closed source and is
 only a source of `id1` data.
 
+**Implemented (#42, #43):** the vendored tree now carries the client side of
+upstream too, and one CMake tree builds the headless `libdqsim`, the tests,
+and the `deepquake` client executable — the same sources, selected for their
+role at compile time (upstream's own `isDedicated` switch gates every client
+subsystem; the simulator stubs the client, the client compiles it). The
+brain hook lives in `brain_hook.c`, linked by both; in the client,
+`brain_onnx.c` nominates a Grunt when the `dq_model` cvar names a model,
+runs it through the system ONNX Runtime (CUDA provider, CPU fallback,
+measured 78-87 microseconds per decision at the hook's 72 Hz tick), and
+maps greedy per-head actions to the same discrete decisions training used.
+A verification build (`-DDQSIM_CLIENT_SELFTEST="model,report"`) replays
+synthetic hook reports through the client's own observation builder and
+model and writes them for comparison against the Python policy — measured
+deviations: observation 3.6e-7, probabilities 6.0e-8, identical greedy
+actions. Without a model the client is stock Quake.
+
 **Fidelity is measured, not assumed.** `engine/tests/test_fidelity.c` (ctest
 name `dqsim.fidelity`) starts a second, unmodified QuakeSpasm built from the
 same vendored commit by `tools/fetch_fidelity_reference.sh`, and drives both

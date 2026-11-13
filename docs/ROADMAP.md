@@ -287,8 +287,8 @@ decisions, and the outcome rates are asserted to fill exactly 100%.
 
 ## M5 — Play against it
 
-- [ ] Playable client built from the same vendored engine
-- [ ] ONNX inference in the client (CUDA with CPU fallback), batched per tick
+- [x] Playable client built from the same vendored engine (#42: the `deepquake` target; client sources vendored from the same upstream commit, no vendored-file edits)
+- [x] ONNX inference in the client (CUDA with CPU fallback) (#43: the shared brain hook drives one Grunt from the ONNX export; 78-87 microseconds per decision measured; batching per tick arrives with multi-monster, M6)
 - [ ] Stock AI fallback when no model is present
 - [ ] Model manifest, download tool, first public release
 

@@ -60,6 +60,7 @@ set_target_properties(quakespasm_phys PROPERTIES C_EXTENSIONS ON)
 target_compile_options(quakespasm_phys PRIVATE -w -fno-strict-aliasing)
 
 add_library(dqsim SHARED
+  src/brain_hook.c
   src/client_stubs.c
   src/dqsim.c
   src/handicap.c
@@ -98,6 +99,15 @@ find_package(OpenGL QUIET)
 find_package(PkgConfig QUIET)
 pkg_check_modules(DQSIM_SDL2 IMPORTED_TARGET sdl2)
 if(OpenGL_FOUND AND DQSIM_SDL2_FOUND)
+  pkg_check_modules(DQSIM_ONNXRUNTIME IMPORTED_TARGET libonnxruntime)
+  if(DQSIM_ONNXRUNTIME_FOUND)
+    set(DQSIM_CLIENT_BRAIN src/brain_hook.c src/brain_onnx.c)
+    # A verification build runs the synthetic selftest after the first
+    # level start and quits (headless acceptance; never in production).
+    set(DQSIM_CLIENT_SELFTEST "" CACHE STRING "model,report paths to selftest at first level start")
+  else()
+    message(STATUS "DeepQuake client: ONNX Runtime not found - the client builds without policy-driven monsters (stock AI only)")
+  endif()
 add_executable(deepquake
   ${QS_DIR}/bgmusic.c
   ${QS_DIR}/cd_sdl.c
@@ -167,12 +177,31 @@ add_executable(deepquake
   ${QS_DIR}/wad.c
   ${QS_DIR}/world.c
   ${QS_DIR}/zone.c
+  ${DQSIM_CLIENT_BRAIN}
 )
 set_target_properties(deepquake PROPERTIES C_EXTENSIONS ON)
-target_include_directories(deepquake PRIVATE ${QS_DIR})
-target_compile_definitions(deepquake PRIVATE USE_SDL2)
+target_include_directories(deepquake PRIVATE ${QS_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(deepquake PRIVATE USE_SDL2 rand=dqsim_rand)
 target_compile_options(deepquake PRIVATE -w -fno-strict-aliasing)
 target_link_libraries(deepquake PRIVATE PkgConfig::DQSIM_SDL2 OpenGL::GL m)
+if(DQSIM_ONNXRUNTIME_FOUND)
+  target_sources(deepquake PRIVATE src/rng.c src/handicap.c)
+  target_link_libraries(deepquake PRIVATE PkgConfig::DQSIM_ONNXRUNTIME)
+  if(DQSIM_CLIENT_SELFTEST)
+    string(REPLACE "," ";" DQSIM_CLIENT_SELFTEST_PAIR "${DQSIM_CLIENT_SELFTEST}")
+    list(GET DQSIM_CLIENT_SELFTEST_PAIR 0 DQSIM_CLIENT_SELFTEST_MODEL)
+    list(GET DQSIM_CLIENT_SELFTEST_PAIR 1 DQSIM_CLIENT_SELFTEST_REPORT)
+    target_compile_definitions(deepquake PRIVATE
+      DQ_CLIENT_SELFTEST
+      "DQ_CLIENT_SELFTEST_MODEL=\"${DQSIM_CLIENT_SELFTEST_MODEL}\""
+      "DQ_CLIENT_SELFTEST_REPORT=\"${DQSIM_CLIENT_SELFTEST_REPORT}\"")
+  endif()
+  # The hooked sv_phys (#43): the client's Grunt decisions come from the
+  # policy instead of QuakeC, exactly as in the simulator. Without a
+  # model the hook is never nominated and play is stock (#44).
+  set_source_files_properties(${QS_DIR}/sv_phys.c PROPERTIES
+    COMPILE_DEFINITIONS PR_ExecuteProgram=dqsim_hook_execute_program)
+endif()
 # Fail the build on any undefined engine symbol, like the simulator does.
 target_link_options(deepquake PRIVATE -Wl,-z,defs)
 message(STATUS "DeepQuake client: building (SDL2 ${DQSIM_SDL2_VERSION})")
