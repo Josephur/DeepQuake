@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * ONNX inference for the play client's brain hook (#43, M5).
+ * ONNX inference for the play client's brain hook (#43, M5; every
+ * monster of a class from #46, M6).
  *
  * A model produced by deepquake.export_onnx (GRU actor-critic: inputs
  * observation + recurrent state, outputs per-head probabilities, value,
@@ -10,10 +11,13 @@
  * and strafe at the monster command speed, turn steps accumulated into
  * the facing, and the attack bit that starts the real QuakeC sequence.
  *
+ * Every monster the model covers is nominated in the hook's slot table,
+ * each with its own recurrent state, last-seen memory and facing: a level
+ * has up to 35 Grunts, and one shared hidden state would smear their
+ * episodes together. The number is capped by dq_max_monsters (0 = all).
+ *
  * The observation the model consumes is deepquake.monster's (#33): the
- * dq_brain_build_observation function below constructs exactly that
- * layout, and tests/test_brain_onnx.c verifies the C pipeline against
- * the Python policy on synthetic hook reports.
+ * dq_build_observation function below constructs exactly that layout.
  *
  * Without a model (no dq_model cvar, or a load failure) the client plays
  * the stock game (#44's fallback): the hook is simply never nominated.
@@ -24,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "brain_hook.h"
 #include "dq_internal.h"
@@ -37,13 +42,62 @@
  * policy was trained with (the engine's monster physics cap what moves). */
 #define DQ_MONSTER_SPEED 400.0f
 #define DQ_MONSTER_MAX_HIDDEN 256
+/* dq_model is a space-separated list; one session per model, and each
+ * model names the monster classes it drives in "<path>.monsters". */
+#define DQ_MAX_MODELS 4
+#define DQ_MAX_CLASSES 8
+#define DQ_MAX_PATH 512
 
-/* The action layout of the model (deepquake.monster_env.ACTION_NVEC) and
- * the turn grid (combat.TURN_DEGREES), overridable from a layout sidecar
- * next to the model so a differently-shaped model needs no recompile. */
-static int dq_nvec[8] = {3, 3, 7, 2};
-static int dq_nvec_count = 4;
-static float dq_turn_degrees[8] = {-30.0f, -15.0f, -5.0f, 0.0f, 5.0f, 15.0f, 30.0f, 0.0f};
+typedef struct dq_model_class {
+    char classname[32];
+    int type_index;
+} dq_model_class;
+
+typedef struct dq_model {
+    char path[DQ_MAX_PATH];
+    OrtSession *session;
+    char *name_in_obs, *name_in_hidden;
+    char *name_out_probs, *name_out_value, *name_out_hidden;
+    size_t hidden_dim;
+    int obs_dim;
+    /* The action layout (deepquake.monster_env.ACTION_NVEC) and the turn
+     * grid (combat.TURN_DEGREES), from the ".nvec" sidecar; the Grunt's
+     * layout is the default so a model without one still runs. */
+    int nvec[8];
+    int nvec_count;
+    float turn[8];
+    dq_model_class classes[DQ_MAX_CLASSES];
+    int class_count;
+} dq_model;
+
+/* One policy-driven monster's inference state (#46): the recurrent state,
+ * the observation's last-seen memory and the facing the turn actions
+ * accumulate into. All per monster, never shared. */
+typedef struct dq_monster_state {
+    int entity_index; /* 0 = free */
+    dq_model *model;
+    float hidden[DQ_MONSTER_MAX_HIDDEN];
+    float last_seen[3];
+    double last_seen_time;
+    int last_seen_valid;
+    float yaw;
+    int skill;
+} dq_monster_state;
+
+static dq_monster_state monster_states[DQ_BRAIN_MAX_MONSTERS];
+static dq_model models[DQ_MAX_MODELS];
+static int model_count;
+static int models_tried;
+static char last_level[MAX_QPATH];
+/* The edict block this client's per-monster states belong to: a death
+ * restart reloads the same map name but allocates new edicts, so the
+ * hidden states must not carry across it (training zeroes them per
+ * episode). */
+static void *last_edicts;
+static int reported_driven = -1;
+/* Inference cost, reported once a frame at most (never part of the sim). */
+static long long inference_ns;
+static int inference_count;
 
 /* Obtained with Cvar_Get at registration, so "+set" on the command line
  * and these are the same instances. */
@@ -51,22 +105,11 @@ static cvar_t dq_model_var = {"dq_model", "", CVAR_ARCHIVE};
 static cvar_t dq_style_var = {"dq_style", "0.5 0.5 0.5", CVAR_ARCHIVE};
 static cvar_t dq_seed_var = {"dq_seed", "7", CVAR_ARCHIVE};
 static cvar_t dq_cpu_var = {"dq_onnx_cpu", "0", CVAR_ARCHIVE};
-static cvar_t *cvar_model, *cvar_style, *cvar_seed, *cvar_cpu;
+static cvar_t dq_max_var = {"dq_max_monsters", "0", CVAR_ARCHIVE};
+static cvar_t *cvar_model, *cvar_style, *cvar_seed, *cvar_cpu, *cvar_max;
 
 static OrtEnv *ort_env;
-static OrtSession *ort_session;
 static OrtMemoryInfo *ort_memory;
-static char *name_in_obs, *name_in_hidden;
-static char *name_out_probs, *name_out_value, *name_out_hidden;
-static float hidden_state[DQ_MONSTER_MAX_HIDDEN];
-static size_t hidden_dim;
-static int obs_dim;
-
-/* Monster observation state (#33): the last-seen enemy memory. */
-static float last_seen[3];
-static double last_seen_time;
-static int last_seen_valid;
-static float monster_yaw;
 static int dq_cvars_registered;
 static int seeded;
 
@@ -90,15 +133,16 @@ static float parse_float(const char **cursor)
 
 /* Read "<model>.nvec": a line of ACTION_NVEC integers, optionally a line
  * of turn degrees. Without the sidecar the Grunt layout is assumed. */
-static void read_layout(const char *model_path)
+static void read_layout(dq_model *model)
 {
-    char layout[1040];
-    q_snprintf(layout, sizeof(layout), "%s.nvec", model_path);
+    char layout[DQ_MAX_PATH + 8];
+    q_snprintf(layout, sizeof(layout), "%s.nvec", model->path);
     FILE *f = fopen(layout, "r");
     if (!f)
         return;
     int count = 0;
-    while (count < 8 && fscanf(f, " %d", &dq_nvec[count]) == 1) count++, dq_nvec_count = count;
+    while (count < 8 && fscanf(f, " %d", &model->nvec[count]) == 1)
+        count++, model->nvec_count = count;
     char line[256];
     if (fgets(line, sizeof(line), f) && fgets(line, sizeof(line), f)) {
         const char *cursor = line;
@@ -107,85 +151,156 @@ static void read_layout(const char *model_path)
             float value = parse_float(&cursor);
             if (cursor == line)
                 break;
-            dq_turn_degrees[got++] = value;
+            model->turn[got++] = value;
             line[0] = '\0';
         }
     }
     fclose(f);
 }
 
-static int load_model(const char *path)
+/* Read "<model>.monsters" (written by deepquake.export_onnx): one
+ * "<classname> <type index>" per line. Without it the model is the Grunt
+ * policy, which is what models-v1 shipped. */
+static void read_classes(dq_model *model)
+{
+    char list[DQ_MAX_PATH + 16];
+    q_snprintf(list, sizeof(list), "%s.monsters", model->path);
+    FILE *f = fopen(list, "r");
+    if (!f)
+        return;
+    char classname[32];
+    int type_index;
+    while (model->class_count < DQ_MAX_CLASSES &&
+           fscanf(f, " %31s %d", classname, &type_index) == 2) {
+        dq_model_class *entry = &model->classes[model->class_count++];
+        q_strlcpy(entry->classname, classname, sizeof(entry->classname));
+        entry->type_index = type_index;
+    }
+    fclose(f);
+}
+
+static int load_model(dq_model *model)
 {
     const OrtApi *api = ort();
-    if (api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "deepquake-client", &ort_env))
+    if (!ort_env && api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "deepquake-client", &ort_env))
         return -1;
 
     /* CUDA when present, CPU as the fallback (ARCHITECTURE.md M5). */
-    for (int attempt = 0; attempt < 2 && !ort_session; attempt++) {
+    for (int attempt = 0; attempt < 2 && !model->session; attempt++) {
         OrtSessionOptions *options;
         if (api->CreateSessionOptions(&options))
             return -1;
         api->SetIntraOpNumThreads(options, 1);
-        if (attempt == 0 && !(cvar_cpu && cvar_cpu->value != 0.0f))
+        if (attempt == 0 && !(cvar_cpu && cvar_cpu->value != 0.0f)) {
             api->SessionOptionsAppendExecutionProvider(options, "CUDA", NULL, NULL, 0);
-        else if (attempt == 0) {
+        } else if (attempt == 0) {
             /* dq_onnx_cpu 1: skip the CUDA attempt (latency measurement). */
             api->ReleaseSessionOptions(options);
             continue;
         }
-        OrtStatus *status = api->CreateSession(ort_env, path, options, &ort_session);
+        OrtStatus *status = api->CreateSession(ort_env, model->path, options, &model->session);
         api->ReleaseSessionOptions(options);
         if (status) {
-            Con_Printf("deepquake: %s execution provider unavailable: %s\n",
-                       attempt == 0 ? "CUDA" : "CPU", api->GetErrorMessage(status));
+            Con_Printf("deepquake: %s execution provider unavailable for %s: %s\n",
+                       attempt == 0 ? "CUDA" : "CPU", model->path, api->GetErrorMessage(status));
             api->ReleaseStatus(status);
-            ort_session = NULL;
+            model->session = NULL;
         }
     }
-    if (!ort_session)
+    if (!model->session)
         return -1;
 
     OrtAllocator *allocator;
     api->GetAllocatorWithDefaultOptions(&allocator);
-    api->SessionGetInputName(ort_session, 0, allocator, &name_in_obs);
-    api->SessionGetInputName(ort_session, 1, allocator, &name_in_hidden);
-    api->SessionGetOutputName(ort_session, 0, allocator, &name_out_probs);
-    api->SessionGetOutputName(ort_session, 1, allocator, &name_out_value);
-    api->SessionGetOutputName(ort_session, 2, allocator, &name_out_hidden);
-    api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &ort_memory);
+    api->SessionGetInputName(model->session, 0, allocator, &model->name_in_obs);
+    api->SessionGetInputName(model->session, 1, allocator, &model->name_in_hidden);
+    api->SessionGetOutputName(model->session, 0, allocator, &model->name_out_probs);
+    api->SessionGetOutputName(model->session, 1, allocator, &model->name_out_value);
+    api->SessionGetOutputName(model->session, 2, allocator, &model->name_out_hidden);
+    if (!ort_memory)
+        api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &ort_memory);
 
     OrtTypeInfo *type;
     const OrtTensorTypeAndShapeInfo *tensor;
     size_t dims;
     int64_t shape[4];
-    api->SessionGetInputTypeInfo(ort_session, 1, &type);
+    api->SessionGetInputTypeInfo(model->session, 1, &type);
     api->CastTypeInfoToTensorInfo(type, &tensor);
     api->GetDimensionsCount(tensor, &dims);
     api->GetDimensions(tensor, shape, dims);
     api->ReleaseTypeInfo(type);
-    hidden_dim = (size_t)shape[1];
-    if (hidden_dim > DQ_MONSTER_MAX_HIDDEN)
-        hidden_dim = DQ_MONSTER_MAX_HIDDEN;
-    api->SessionGetInputTypeInfo(ort_session, 0, &type);
+    model->hidden_dim = (size_t)shape[1];
+    if (model->hidden_dim > DQ_MONSTER_MAX_HIDDEN)
+        model->hidden_dim = DQ_MONSTER_MAX_HIDDEN;
+    api->SessionGetInputTypeInfo(model->session, 0, &type);
     api->CastTypeInfoToTensorInfo(type, &tensor);
     api->GetDimensionsCount(tensor, &dims);
     api->GetDimensions(tensor, shape, dims);
     api->ReleaseTypeInfo(type);
-    obs_dim = (int)shape[1];
+    model->obs_dim = (int)shape[1];
     /* The client drives monster policies only (#35): a model with another
      * observation width is the wrong architecture - refuse it for stock
      * play with a clear log line instead of feeding it misaligned input. */
-    if (obs_dim != DQ_MONSTER_OBS_DIM) {
+    if (model->obs_dim != DQ_MONSTER_OBS_DIM) {
         Con_Printf("deepquake: refusing %s - observation width %d, the client "
                    "expects %d (wrong architecture?)\n",
-                   path, obs_dim, DQ_MONSTER_OBS_DIM);
+                   model->path, model->obs_dim, DQ_MONSTER_OBS_DIM);
         return -1;
     }
     return 0;
 }
 
-void dq_brain_build_observation(const dqsim_hook_observation *hook, int skill,
-                                const float style[3], float *out)
+/* Load every path in dq_model once. A failure is logged once and leaves
+ * the classes that model would drive on the stock AI (#44). */
+static void load_models(const char *list)
+{
+    char buffer[1024];
+    q_strlcpy(buffer, list, sizeof(buffer));
+    char *save = NULL;
+    for (char *token = strtok_r(buffer, " \t", &save);
+         token && model_count < DQ_MAX_MODELS; token = strtok_r(NULL, " \t", &save)) {
+        dq_model *model = &models[model_count];
+        memset(model, 0, sizeof(*model));
+        q_strlcpy(model->path, token, sizeof(model->path));
+        model->nvec[0] = 3;
+        model->nvec[1] = 3;
+        model->nvec[2] = 7;
+        model->nvec[3] = 2;
+        model->nvec_count = 4;
+        static const float grunt_turn[8] = {-30.0f, -15.0f, -5.0f,
+                                            0.0f,   5.0f,   15.0f, 30.0f, 0.0f};
+        memcpy(model->turn, grunt_turn, sizeof(grunt_turn));
+        read_layout(model);
+        read_classes(model);
+        if (!model->class_count) {
+            q_strlcpy(model->classes[0].classname, "monster_army",
+                      sizeof(model->classes[0].classname));
+            model->classes[0].type_index = 0;
+            model->class_count = 1;
+        }
+        if (load_model(model)) {
+            Con_Printf("deepquake: %s did not load; its monsters stay stock\n", model->path);
+            memset(model, 0, sizeof(*model));
+            continue;
+        }
+        Con_Printf("deepquake: loaded %s\n", model->path);
+        model_count++;
+    }
+}
+
+static dq_model *model_for_class(const char *classname)
+{
+    for (int m = 0; m < model_count; m++)
+        for (int c = 0; c < models[m].class_count; c++)
+            if (strcmp(models[m].classes[c].classname, classname) == 0)
+                return &models[m];
+    return NULL;
+}
+
+/* The observation deepquake.monster builds (#33), from a live hook report
+ * and this monster's memory. Kept in C so the client needs no Python. */
+static void dq_build_observation(dq_monster_state *state,
+                                 const dqsim_hook_observation *hook, float *out)
 {
     const int rays = DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS;
     memset(out, 0, sizeof(float) * DQ_MONSTER_OBS_DIM);
@@ -201,7 +316,8 @@ void dq_brain_build_observation(const dqsim_hook_observation *hook, int skill,
     out[at + 1] = (-hook->velocity[0] * sin_yaw + hook->velocity[1] * cos_yaw) / 400.0f;
     out[at + 2] = hook->velocity[2] / 400.0f;
     out[at + 3] = hook->on_ground ? 1.0f : 0.0f;
-    out[at + 4] = hook->health < 0.0f ? 0.0f : (hook->health > 100.0f ? 1.0f : hook->health / 100.0f);
+    out[at + 4] = hook->health < 0.0f ? 0.0f
+                  : (hook->health > 100.0f ? 1.0f : hook->health / 100.0f);
     out[at + 5] = hook->attack_cooldown < 0.0f ? 0.0f
                   : (hook->attack_cooldown > 1.0f ? 1.0f : hook->attack_cooldown);
     out[at + 6] = hook->waterlevel / 3.0f;
@@ -215,9 +331,9 @@ void dq_brain_build_observation(const dqsim_hook_observation *hook, int skill,
     }
     if (enemy) {
         for (int k = 0; k < 3; k++)
-            last_seen[k] = hook->origin[k] + enemy->relative[k];
-        last_seen_time = hook->time;
-        last_seen_valid = 1;
+            state->last_seen[k] = hook->origin[k] + enemy->relative[k];
+        state->last_seen_time = hook->time;
+        state->last_seen_valid = 1;
         float dx = enemy->relative[0], dy = enemy->relative[1];
         float distance = sqrtf(dx * dx + dy * dy);
         float scale = 1.0f / (distance > 1e-6f ? distance : 1e-6f);
@@ -233,16 +349,16 @@ void dq_brain_build_observation(const dqsim_hook_observation *hook, int skill,
         out[at + 12] = enemy->health < 0.0f ? 0.0f
                        : (enemy->health > 100.0f ? 1.0f : enemy->health / 100.0f);
     }
-    if (last_seen_valid) {
-        float age = (float)(hook->time - last_seen_time);
+    if (state->last_seen_valid) {
+        float age = (float)(hook->time - state->last_seen_time);
         if (age < 0.0f)
             age = 0.0f;
         if (age > DQ_MONSTER_MEMORY_SECONDS) {
-            last_seen_valid = 0;
+            state->last_seen_valid = 0;
         } else {
-            float rx = last_seen[0] - hook->origin[0];
-            float ry = last_seen[1] - hook->origin[1];
-            float rz = last_seen[2] - hook->origin[2];
+            float rx = state->last_seen[0] - hook->origin[0];
+            float ry = state->last_seen[1] - hook->origin[1];
+            float rz = state->last_seen[2] - hook->origin[2];
             float distance = sqrtf(rx * rx + ry * ry);
             float scale = 1.0f / (distance > 1e-6f ? distance : 1e-6f);
             out[at + 13] = (rx * cos_yaw + ry * sin_yaw) * scale;
@@ -257,39 +373,47 @@ void dq_brain_build_observation(const dqsim_hook_observation *hook, int skill,
         }
     }
 
-    out[at + 19] = skill / 3.0f;
-    out[at + 20] = style[0];
-    out[at + 21] = style[1];
-    out[at + 22] = style[2];
+    out[at + 19] = state->skill / 3.0f;
+    /* The fixed style the cross-check test uses (0.25, 0.5, 0.75); exposing
+     * dq_style to the policy is the M6 cvar item. */
+    out[at + 20] = 0.25f;
+    out[at + 21] = 0.5f;
+    out[at + 22] = 0.75f;
 }
 
-/* The client's policy: the brain-hook callback running the model. */
+/* The client's policy: the brain-hook callback running this monster's
+ * model on this monster's state. */
 static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *action,
                         void *user)
 {
+    dq_monster_state *state = user;
+    dq_model *model = state->model;
     const OrtApi *api = ort();
-    (void)user;
-
-    /* The fixed style the cross-check test uses (0.25, 0.5, 0.75). */
-    float style[3] = {0.25f, 0.5f, 0.75f};
 
     float obs[DQ_MONSTER_OBS_DIM];
-    dq_brain_build_observation(hook, dq_brain_hook_skill(), style, obs);
+    dq_build_observation(state, hook, obs);
 
-    int64_t shape[2] = {1, (int64_t)obs_dim};
-    int64_t hshape[2] = {1, (int64_t)hidden_dim};
+    int64_t shape[2] = {1, (int64_t)model->obs_dim};
+    int64_t hshape[2] = {1, (int64_t)model->hidden_dim};
     OrtValue *input_obs = NULL, *input_hidden = NULL;
-    api->CreateTensorWithDataAsOrtValue(ort_memory, obs, sizeof(float) * obs_dim, shape, 2,
-                                        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_obs);
-    api->CreateTensorWithDataAsOrtValue(ort_memory, hidden_state,
-                                        sizeof(float) * hidden_dim, hshape, 2,
+    api->CreateTensorWithDataAsOrtValue(ort_memory, obs, sizeof(float) * model->obs_dim, shape,
+                                        2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_obs);
+    api->CreateTensorWithDataAsOrtValue(ort_memory, state->hidden,
+                                        sizeof(float) * model->hidden_dim, hshape, 2,
                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_hidden);
     const OrtValue *inputs[2] = {input_obs, input_hidden};
-    const char *output_names[3] = {name_out_probs, name_out_value, name_out_hidden};
+    const char *output_names[3] = {model->name_out_probs, model->name_out_value,
+                                   model->name_out_hidden};
     OrtValue *output_values[3] = {NULL, NULL, NULL};
-    const char *input_names[2] = {name_in_obs, name_in_hidden};
-    OrtStatus *status = api->Run(ort_session, NULL, input_names, inputs, 2,
-                                 output_names, 3, output_values);
+    const char *input_names[2] = {model->name_in_obs, model->name_in_hidden};
+    struct timespec t_start, t_end;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    OrtStatus *status = api->Run(model->session, NULL, input_names, inputs, 2, output_names, 3,
+                                 output_values);
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    inference_ns += (t_end.tv_sec - t_start.tv_sec) * 1000000000LL +
+                    (t_end.tv_nsec - t_start.tv_nsec);
+    inference_count++;
     api->ReleaseValue(input_obs);
     api->ReleaseValue(input_hidden);
     if (status) {
@@ -302,81 +426,126 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
     float *new_hidden;
     api->GetTensorMutableData(output_values[0], (void **)&probs);
     api->GetTensorMutableData(output_values[2], (void **)&new_hidden);
-    memcpy(hidden_state, new_hidden, sizeof(float) * hidden_dim);
+    memcpy(state->hidden, new_hidden, sizeof(float) * model->hidden_dim);
 
     int actions[8];
     int offset = 0;
-    for (int head = 0; head < dq_nvec_count; head++) {
+    for (int head = 0; head < model->nvec_count; head++) {
         int best = 0;
-        for (int i = 1; i < dq_nvec[head]; i++)
+        for (int i = 1; i < model->nvec[head]; i++)
             if (probs[offset + i] > probs[offset + best])
                 best = i;
         actions[head] = best;
-        offset += dq_nvec[head];
+        offset += model->nvec[head];
     }
     api->ReleaseValue(output_values[0]);
     api->ReleaseValue(output_values[1]);
     api->ReleaseValue(output_values[2]);
 
-    monster_yaw = fmodf(monster_yaw + dq_turn_degrees[actions[2]], 360.0f);
-    if (monster_yaw < 0.0f)
-        monster_yaw += 360.0f;
-    action->desired_yaw = monster_yaw;
+    state->yaw = fmodf(state->yaw + model->turn[actions[2]], 360.0f);
+    if (state->yaw < 0.0f)
+        state->yaw += 360.0f;
+    action->desired_yaw = state->yaw;
     action->forward = (actions[0] - 1) * DQ_MONSTER_SPEED;
     action->side = (1 - actions[1]) * DQ_MONSTER_SPEED;
     action->attack = actions[3] != 0;
 }
+
 static void register_cvars(void);
 static void dq_selftest_run(const char *model, const char *report);
 
-/* Nominate the first stock Grunt once the model is ready. Runs from the
- * brain hook's client extension point while nothing is nominated, so it
- * also retries after a level change (the nomination clears per level). */
-static void try_nominate(void)
+static dq_monster_state *free_state(void)
 {
-    register_cvars();
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (!monster_states[i].entity_index)
+            return &monster_states[i];
+    return NULL;
+}
+
+/* Forget monsters that died or that the hook no longer drives (a level
+ * change clears the hook's slots, so this is also the re-nomination path). */
+static void release_dead_states(void)
+{
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++) {
+        dq_monster_state *state = &monster_states[i];
+        if (!state->entity_index)
+            continue;
+        if (state->entity_index >= sv.num_edicts) {
+            memset(state, 0, sizeof(*state));
+            continue;
+        }
+        edict_t *ent = EDICT_NUM(state->entity_index);
+        if (ent->free || ent->v.health <= 0.0f || !dq_brain_hook_is_nominated(state->entity_index))
+            memset(state, 0, sizeof(*state));
+    }
+}
+
+/* Nominate every live monster whose class a loaded model covers, each
+ * with its own inference state, up to dq_max_monsters. Runs once per
+ * engine tick from the client tick; a level change resets the indices. */
+static void nominate_pass(void)
+{
+    if (strcmp(sv.name, last_level) != 0 || sv.edicts != last_edicts) {
+        q_strlcpy(last_level, sv.name, sizeof(last_level));
+        last_edicts = sv.edicts;
+        memset(monster_states, 0, sizeof(monster_states));
+        reported_driven = -1;
+    }
+    release_dead_states();
     if (!cvar_model->string[0])
         return;
-    if (!ort_session && load_model(cvar_model->string)) {
-        Con_Printf("deepquake: playing stock AI (model %s did not load)\n", cvar_model->string);
-        Cvar_Set("dq_model", ""); /* do not retry every tick */
-        return;
+    if (!models_tried) {
+        models_tried = 1;
+        load_models(cvar_model->string);
     }
-    if (!sv.active || !dq_brain_progs_is_stock())
+    if (!model_count || !sv.active || !dq_brain_progs_is_stock())
         return;
-    for (int i = 1; i < sv.num_edicts; i++) {
+    if (!cvar_model || !cvar_max)
+        return;
+
+    int cap = cvar_max->value > 0.0f ? (int)cvar_max->value : DQ_BRAIN_MAX_MONSTERS;
+    if (cap > DQ_BRAIN_MAX_MONSTERS)
+        cap = DQ_BRAIN_MAX_MONSTERS;
+    int driven = dq_brain_hook_count();
+    if (!seeded) {
+        seeded = 1;
+        dq_rand_seed((uint32_t)(int)cvar_seed->value);
+    }
+    for (int i = 1; i < sv.num_edicts && driven < cap; i++) {
         edict_t *ent = EDICT_NUM(i);
         if (ent->free)
             continue;
-        const char *classname = PR_GetString(ent->v.classname);
-        if (strncmp(classname, "monster_army", 12) != 0)
+        dq_model *model = model_for_class(PR_GetString(ent->v.classname));
+        if (!model)
             continue;
-        if (!seeded) {
-            seeded = 1;
-            dq_rand_seed((uint32_t)(int)cvar_seed->value);
-        }
+        if (dq_brain_hook_is_nominated(i))
+            continue;
+        dq_monster_state *state = free_state();
+        if (!state)
+            break;
+        state->entity_index = i;
+        state->model = model;
+        state->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
         /* The recurrent state starts at zero for every episode, like
          * training; the facing continues from the monster's own. */
-        memset(hidden_state, 0, sizeof(hidden_state));
-        last_seen_valid = 0;
-        monster_yaw = ent->v.angles[YAW];
-        const char *error = dq_brain_hook_nominate(i, onnx_policy, NULL);
-        if (error)
-            Con_Printf("deepquake: Grunt %d stays stock: %s\n", i, error);
-        else
-            Con_Printf("deepquake: Grunt %d is driven by %s\n", i, cvar_model->string);
-        return;
+        state->yaw = ent->v.angles[YAW];
+        const char *error = dq_brain_hook_nominate(i, onnx_policy, state);
+        if (error) {
+            memset(state, 0, sizeof(*state));
+            continue;
+        }
+        driven++;
+    }
+    if (driven != reported_driven) {
+        reported_driven = driven;
+        Con_Printf("deepquake: %d monster(s) driven by the model%s\n", driven,
+                   driven ? "" : " (stock AI)");
     }
 }
 
 /* Installed as the brain hook's client tick (see brain_hook.c). */
 static void client_tick(void)
 {
-    {
-        static int probes;
-        if (probes < 3)
-            Con_Printf("client probe %d\n", ++probes);
-    }
     /* The stock progs identity, once. The client's basedir handling is
      * upstream's own (Sys_GetBasedir), so the identity is read through
      * the engine's search path: for the v1 client (no -game) that is the
@@ -394,7 +563,23 @@ static void client_tick(void)
             Con_Printf("deepquake: no progs.dat on the search path - stock AI only\n");
         }
     }
-    try_nominate();
+    register_cvars();
+
+    /* Once per engine tick, not once per QuakeC execution: nomination
+     * scans the edict list, and the timing line is a whole-tick average. */
+    static double last_pass = -1.0;
+    if (sv.time == last_pass)
+        return;
+    last_pass = sv.time;
+    nominate_pass();
+    static int seconds;
+    if (inference_count && (int)sv.time != seconds) {
+        seconds = (int)sv.time;
+        if (seconds % 10 == 0)
+            Con_Printf("deepquake: %d decisions, %.0f us/decision, %d monster(s)\n",
+                       inference_count, (double)inference_ns / 1000.0 / inference_count,
+                       dq_brain_hook_count());
+    }
 #ifdef DQ_CLIENT_SELFTEST
     /* Verification build: once a level is live, run the synthetic-report
      * selftest and quit - a headless acceptance run. */
@@ -418,16 +603,12 @@ __attribute__((constructor)) static void install_tick(void)
  *
  * Run from the client console: dq_selftest <model> <report_path>. Writes,
  * per case, the observation vector the C builder produced, the model's
- * probabilities and the greedy actions. tests/test_brain_onnx.py builds
- * the same reports through deepquake.monster and onnxruntime and compares.
+ * probabilities and the greedy actions. The Python side (export parity
+ * tests) builds the same reports through deepquake.monster and
+ * onnxruntime and compares.
  */
-#include <ctype.h>
-#include <time.h>
-
 static void dq_selftest_make_hook(double time, int visible, dqsim_hook_observation *hook)
 {
-    static float rays[DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS];
-    static unsigned char kinds[DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS];
     memset(hook, 0, sizeof(*hook));
     hook->time = time;
     hook->entity_index = 9;
@@ -437,38 +618,44 @@ static void dq_selftest_make_hook(double time, int visible, dqsim_hook_observati
     hook->health = 80.0f;
     hook->on_ground = true;
     for (int i = 0; i < DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS; i++) {
-        rays[i] = (float)(i % 7) * 0.1f + 0.05f;
-        kinds[i] = (unsigned char)(i % 7);
+        hook->rays[i] = (float)(i % 7) * 0.1f + 0.05f;
+        hook->ray_kinds[i] = (unsigned char)(i % 7);
     }
-    memcpy(hook->rays, rays, sizeof(rays));
-    memcpy(hook->ray_kinds, kinds, sizeof(kinds));
     hook->attack_cooldown = 0.3f;
     if (visible) {
-        static dqsim_hook_visible entry;
-        entry.index = 1;
-        entry.flags = FL_CLIENT;
-        entry.relative[0] = 100.0f;
-        entry.relative[1] = 0.0f;
-        entry.relative[2] = 24.0f;
-        entry.health = 60.0f;
-        entry.distance = 100.0f;
-        memcpy(hook->visible, &entry, sizeof(entry));
+        hook->visible[0].index = 1;
+        hook->visible[0].flags = FL_CLIENT;
+        hook->visible[0].relative[0] = 100.0f;
+        hook->visible[0].relative[1] = 0.0f;
+        hook->visible[0].relative[2] = 24.0f;
+        hook->visible[0].health = 60.0f;
+        hook->visible[0].distance = 100.0f;
         hook->visible_count = 1;
     }
 }
 
-static void dq_selftest_run(const char *model, const char *report)
+static void dq_selftest_run(const char *model_path, const char *report)
 {
-    if (!ort_session && load_model(model)) {
-        Con_Printf("dq_selftest: could not load %s\n", model);
-        return;
+    if (!model_count) {
+        memset(&models[0], 0, sizeof(models[0]));
+        q_strlcpy(models[0].path, model_path, sizeof(models[0].path));
+        models[0].nvec[0] = 3;
+        models[0].nvec[1] = 3;
+        models[0].nvec[2] = 7;
+        models[0].nvec[3] = 2;
+        models[0].nvec_count = 4;
+        read_layout(&models[0]);
+        if (load_model(&models[0])) {
+            Con_Printf("dq_selftest: could not load %s\n", model_path);
+            return;
+        }
+        model_count = 1;
     }
-    /* Fresh policy state, exactly as at a nomination. */
-    memset(hidden_state, 0, sizeof(hidden_state));
-    last_seen_valid = 0;
-    monster_yaw = 90.0f;
-    /* The fixed style the cross-check test uses (0.25, 0.5, 0.75). */
-    float style[3] = {0.25f, 0.5f, 0.75f};
+    dq_monster_state state;
+    memset(&state, 0, sizeof(state));
+    state.model = &models[0];
+    state.skill = 2;
+    state.yaw = 90.0f;
 
     FILE *out = fopen(report, "w");
     if (!out) {
@@ -484,22 +671,24 @@ static void dq_selftest_run(const char *model, const char *report)
         dq_selftest_make_hook(case_index == 0 ? 0.0 : (case_index == 1 ? 0.5 : 6.0),
                               case_index < 2, &hook);
         float obs[DQ_MONSTER_OBS_DIM];
-        dq_brain_build_observation(&hook, 2, style, obs);
+        dq_build_observation(&state, &hook, obs);
 
-        int64_t shape[2] = {1, obs_dim};
-        int64_t hshape[2] = {1, (int64_t)hidden_dim};
+        int64_t shape[2] = {1, state.model->obs_dim};
+        int64_t hshape[2] = {1, (int64_t)state.model->hidden_dim};
         OrtValue *in_obs = NULL, *in_hidden = NULL;
-        api->CreateTensorWithDataAsOrtValue(ort_memory, obs, sizeof(float) * obs_dim, shape, 2,
-                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in_obs);
-        api->CreateTensorWithDataAsOrtValue(ort_memory, hidden_state,
-                                            sizeof(float) * hidden_dim, hshape, 2,
+        api->CreateTensorWithDataAsOrtValue(ort_memory, obs, sizeof(float) * state.model->obs_dim,
+                                            shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                                            &in_obs);
+        api->CreateTensorWithDataAsOrtValue(ort_memory, state.hidden,
+                                            sizeof(float) * state.model->hidden_dim, hshape, 2,
                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in_hidden);
-        const char *input_names[2] = {name_in_obs, name_in_hidden};
-        const char *output_names[3] = {name_out_probs, name_out_value, name_out_hidden};
+        const char *input_names[2] = {state.model->name_in_obs, state.model->name_in_hidden};
+        const char *output_names[3] = {state.model->name_out_probs, state.model->name_out_value,
+                                       state.model->name_out_hidden};
         OrtValue *output_values[3] = {NULL, NULL, NULL};
         const OrtValue *inputs[2] = {in_obs, in_hidden};
-        OrtStatus *status = api->Run(ort_session, NULL, input_names, inputs, 2, output_names, 3,
-                                     output_values);
+        OrtStatus *status = api->Run(state.model->session, NULL, input_names, inputs, 2,
+                                    output_names, 3, output_values);
         api->ReleaseValue(in_obs);
         api->ReleaseValue(in_hidden);
         if (status) {
@@ -512,22 +701,18 @@ static void dq_selftest_run(const char *model, const char *report)
         float *new_hidden;
         api->GetTensorMutableData(output_values[0], (void **)&probs);
         api->GetTensorMutableData(output_values[2], (void **)&new_hidden);
-        memcpy(hidden_state, new_hidden, sizeof(float) * hidden_dim);
+        memcpy(state.hidden, new_hidden, sizeof(float) * state.model->hidden_dim);
 
         int actions[8];
         int offset = 0;
-        for (int head = 0; head < dq_nvec_count; head++) {
+        for (int head = 0; head < state.model->nvec_count; head++) {
             int best = 0;
-            for (int i = 1; i < dq_nvec[head]; i++)
+            for (int i = 1; i < state.model->nvec[head]; i++)
                 if (probs[offset + i] > probs[offset + best])
                     best = i;
             actions[head] = best;
-            offset += dq_nvec[head];
+            offset += state.model->nvec[head];
         }
-        api->ReleaseValue(output_values[0]);
-        api->ReleaseValue(output_values[1]);
-        api->ReleaseValue(output_values[2]);
-
         fprintf(out, "case %d\nobs", case_index);
         for (int i = 0; i < DQ_MONSTER_OBS_DIM; i++)
             fprintf(out, " %.6f", obs[i]);
@@ -535,11 +720,14 @@ static void dq_selftest_run(const char *model, const char *report)
         for (int i = 0; i < offset; i++)
             fprintf(out, " %.7f", probs[i]);
         fprintf(out, "\nactions");
-        for (int head = 0; head < dq_nvec_count; head++)
+        for (int head = 0; head < state.model->nvec_count; head++)
             fprintf(out, " %d", actions[head]);
         fprintf(out, "\n");
         fflush(out);
         inferences++;
+        api->ReleaseValue(output_values[0]);
+        api->ReleaseValue(output_values[1]);
+        api->ReleaseValue(output_values[2]);
     }
     clock_gettime(CLOCK_MONOTONIC, &t_end);
     double ms = (t_end.tv_sec - t_start.tv_sec) * 1e3 + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
@@ -549,6 +737,14 @@ static void dq_selftest_run(const char *model, const char *report)
     Con_Printf("dq_selftest: wrote %s\n", report);
 }
 
+static cvar_t *adopt_cvar(cvar_t *ours, const char *name)
+{
+    cvar_t *found = Cvar_FindVar(name);
+    if (found)
+        return found;
+    Cvar_RegisterVariable(ours);
+    return ours;
+}
 
 static void register_cvars(void)
 {
@@ -558,31 +754,27 @@ static void register_cvars(void)
     /* Register ours, then adopt what "+set" asked for: the command line
      * was processed before this registration, and Cvar_Set refuses
      * unknown cvars, so the values live only in host_parms.argv. */
-    if (!(cvar_model = Cvar_FindVar("dq_model"))) {
-        cvar_model = &dq_model_var;
-        Cvar_RegisterVariable(cvar_model);
-    }
-    if (!(cvar_style = Cvar_FindVar("dq_style"))) {
-        cvar_style = &dq_style_var;
-        Cvar_RegisterVariable(cvar_style);
-    }
-    if (!(cvar_seed = Cvar_FindVar("dq_seed"))) {
-        cvar_seed = &dq_seed_var;
-        Cvar_RegisterVariable(cvar_seed);
-    if (!(cvar_cpu = Cvar_FindVar("dq_onnx_cpu"))) {
-        cvar_cpu = &dq_cpu_var;
-        Cvar_RegisterVariable(cvar_cpu);
-    }
-    }
+    cvar_model = adopt_cvar(&dq_model_var, "dq_model");
+    cvar_style = adopt_cvar(&dq_style_var, "dq_style");
+    cvar_seed = adopt_cvar(&dq_seed_var, "dq_seed");
+    cvar_cpu = adopt_cvar(&dq_cpu_var, "dq_onnx_cpu");
+    cvar_max = adopt_cvar(&dq_max_var, "dq_max_monsters");
+    struct {
+        const char *name;
+        cvar_t *var;
+    } const adopted[] = {
+        {"dq_model", cvar_model},
+        {"dq_style", cvar_style},
+        {"dq_seed", cvar_seed},
+        {"dq_onnx_cpu", cvar_cpu},
+        {"dq_max_monsters", cvar_max},
+    };
     for (int i = 1; i < host_parms->argc - 2; i++) {
         if (strcmp(host_parms->argv[i], "+set") != 0)
             continue;
         const char *name = host_parms->argv[i + 1];
-        cvar_t *var = strcmp(name, "dq_model") == 0   ? cvar_model
-                      : strcmp(name, "dq_style") == 0 ? cvar_style
-                      : strcmp(name, "dq_seed") == 0  ? cvar_seed
-                                                      : NULL;
-        if (var)
-            Cvar_Set(name, host_parms->argv[i + 2]);
+        for (size_t k = 0; k < sizeof(adopted) / sizeof(*adopted); k++)
+            if (strcmp(name, adopted[k].name) == 0)
+                Cvar_Set(name, host_parms->argv[i + 2]);
     }
 }

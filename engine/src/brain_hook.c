@@ -24,21 +24,36 @@
 #include "dq_internal.h"
 #include "dqsim/dqsim.h"
 
-static dqsim_hook_callback hook_callback;
-static void *hook_user;
-static int hook_index; /* entity number, 0 = no nomination */
-static char hook_prefix[32]; /* QuakeC state prefix, e.g. "army_" */
-static float hook_stand_frame, hook_run_frame;
-static int hook_run_frames;
-static unsigned hook_anim_tick;
-/* Skill handicaps (#34): schedule at nomination, overridable for tests. */
-static dq_handicap_state hook_handicap;
-static int hook_skill;
+/* One policy-driven monster (#31, many at once from M6): the nomination's
+ * callback and caller state, the QuakeC names it drives, its handicap and
+ * its own animation clock. Slots fill in order from dq_brain_hook_nominate
+ * and empty on release, clear, and every level start. A fixed table, so
+ * nominating never allocates and never fails for want of memory. */
+typedef struct dq_hook_slot {
+    int entity_index; /* entity number, 0 = free slot */
+    dqsim_hook_callback callback;
+    void *user;
+    char prefix[32]; /* QuakeC state prefix, e.g. "army_" */
+    func_t fire_think; /* the attack-sequence think that fires, 0 = none */
+    func_t attack_think; /* the function that starts an attack, 0 = none */
+    float stand_frame, run_frame;
+    int run_frames;
+    unsigned anim_tick;
+    dq_handicap_state handicap;
+    int skill;
+} dq_hook_slot;
+
+static dq_hook_slot hook_slots[DQ_BRAIN_MAX_MONSTERS];
+/* Overrides are per process, not per monster: the simulator drives one
+ * monster and its tests set the schedule for it. */
 static int hook_override_ticks = -1;   /* -1: use the schedule */
 static float hook_override_aim = -1.0f;
-static func_t hook_fire_think; /* the attack-sequence think that fires, 0 = none */
 static int progs_is_stock;
 static char hook_level_name[MAX_QPATH];
+/* The edict block of the level episode the nominations belong to: a death
+ * restart reloads the same map name, but SV_SpawnServer reallocates the
+ * edicts, which is the signal snapshots already use for "new episode". */
+static void *hook_edicts;
 
 static int read_whole_file(const char *path, unsigned char **out, size_t *length);
 static int read_pak_progs(const char *path, unsigned char **out, size_t *length);
@@ -190,9 +205,10 @@ unsigned char dq_classify_ray(vec3_t eye, vec3_t forward, float max_distance,
     return DQSIM_SURFACE_WORLD;
 }
 
-static void effective_handicap(int *reaction_ticks, float *aim_error_deg)
+static void effective_handicap(const dq_hook_slot *slot, int *reaction_ticks,
+                               float *aim_error_deg)
 {
-    dq_handicap_schedule(hook_skill, reaction_ticks, aim_error_deg);
+    dq_handicap_schedule(slot->skill, reaction_ticks, aim_error_deg);
     if (hook_override_ticks >= 0)
         *reaction_ticks = hook_override_ticks;
     if (hook_override_aim >= 0.0f)
@@ -220,27 +236,50 @@ void dq_brain_set_stock_identity(uint64_t hash, size_t length)
     stock_identity_valid = 1;
 }
 
-const dq_handicap_state *dq_brain_hook_handicap(void)
+static void slot_reset(dq_hook_slot *slot)
 {
-    return &hook_handicap;
+    memset(slot, 0, sizeof(*slot));
+    dq_handicap_reset(&slot->handicap);
 }
 
-void dq_brain_set_handicap_state(const dq_handicap_state *state)
+size_t dq_brain_hook_handicaps(dq_handicap_state *out, size_t max)
 {
-    hook_handicap = *state;
+    size_t count = 0;
+
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++) {
+        if (!hook_slots[i].entity_index)
+            continue;
+        if (count < max && out)
+            out[count] = hook_slots[i].handicap;
+        count++;
+    }
+    return count;
+}
+
+int dq_brain_set_handicap_states(const dq_handicap_state *in, size_t count)
+{
+    size_t occupied = 0;
+
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index)
+            occupied++;
+    if (occupied != count)
+        return -1;
+    size_t at = 0;
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index)
+            hook_slots[i].handicap = in[at++];
+    return (int)count;
 }
 
 void dq_brain_hook_on_level_start(void)
 {
     if (!stock_identity_valid)
         return;
-    hook_callback = NULL;
-    hook_user = NULL;
-    hook_index = 0;
-    hook_fire_think = 0;
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        slot_reset(&hook_slots[i]);
     hook_override_ticks = -1;
     hook_override_aim = -1.0f;
-    dq_handicap_reset(&hook_handicap);
     /* Identity of the progs this level actually loaded: the raw file
      * bytes through the engine's search path (a game directory shadows
      * id1), hashed with its length. Reading the in-memory progs instead
@@ -271,15 +310,15 @@ static func_t find_function(const char *name)
 /* The attack-sequence think that actually fires: the "<prefix>atkN" state
  * function whose statements call "<prefix>fire" (#34). 0 when there is
  * none (a melee monster), in which case aim error has nothing to act on. */
-static func_t find_fire_think(void)
+static func_t find_fire_think(const char *prefix)
 {
     char name[40];
-    q_snprintf(name, sizeof(name), "%sfire", hook_prefix);
+    q_snprintf(name, sizeof(name), "%sfire", prefix);
     func_t fire = find_function(name);
     if (!fire)
         return 0;
     for (int n = 1; n <= 24; n++) {
-        q_snprintf(name, sizeof(name), "%satk%d", hook_prefix, n);
+        q_snprintf(name, sizeof(name), "%satk%d", prefix, n);
         func_t candidate = find_function(name);
         if (!candidate)
             continue;
@@ -310,13 +349,13 @@ static float state_frame(func_t fnum)
     return pr_globals[statement->a];
 }
 
-static int is_decision_think(func_t fnum)
+static int is_decision_think(func_t fnum, const char *prefix)
 {
     const char *name = PR_GetString(pr_functions[fnum].s_name);
-    size_t prefix = strlen(hook_prefix);
-    if (strncmp(name, hook_prefix, prefix) != 0)
+    size_t length_prefix = strlen(prefix);
+    if (strncmp(name, prefix, length_prefix) != 0)
         return 0;
-    const char *rest = name + prefix;
+    const char *rest = name + length_prefix;
     if (strncmp(rest, "stand", 5) != 0 && strncmp(rest, "walk", 4) != 0 &&
         strncmp(rest, "run", 3) != 0)
         return 0;
@@ -324,12 +363,12 @@ static int is_decision_think(func_t fnum)
     return length > 0 && name[length - 1] >= '0' && name[length - 1] <= '9';
 }
 
-static void hook_observe(edict_t *ent, dqsim_hook_observation *obs)
+static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation *obs)
 {
     static const float pitches[DQSIM_HOOK_RAY_PITCHES] = {0.0f, 30.0f};
     memset(obs, 0, sizeof(*obs));
     obs->time = sv.time;
-    obs->entity_index = hook_index;
+    obs->entity_index = entity_index;
     VectorCopy(ent->v.origin, obs->origin);
     VectorCopy(ent->v.velocity, obs->velocity);
     VectorCopy(ent->v.angles, obs->angles);
@@ -400,7 +439,8 @@ static void hook_observe(edict_t *ent, dqsim_hook_observation *obs)
     }
 }
 
-static void hook_apply(edict_t *ent, func_t fnum, const dqsim_hook_observation *obs,
+static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
+                       const dqsim_hook_observation *obs,
                        const dqsim_hook_action *action)
 {
     ent->v.angles[YAW] = action->desired_yaw;
@@ -433,15 +473,13 @@ static void hook_apply(edict_t *ent, func_t fnum, const dqsim_hook_observation *
             }
         }
         eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
-        char attack_name[40];
-        q_snprintf(attack_name, sizeof(attack_name), "%satk1", hook_prefix);
-        func_t attack = enemy ? find_function(attack_name) : 0;
+        func_t attack = enemy ? slot->attack_think : 0;
         if (attack && (!cooldown || sv.time >= cooldown->_float)) {
             int reaction_ticks;
             float aim_error_deg;
-            effective_handicap(&reaction_ticks, &aim_error_deg);
+            effective_handicap(slot, &reaction_ticks, &aim_error_deg);
             (void)reaction_ticks;
-            dq_handicap_roll_aim(&hook_handicap, aim_error_deg);
+            dq_handicap_roll_aim(&slot->handicap, aim_error_deg);
             ent->v.enemy = EDICT_TO_PROG(enemy);
             pr_global_struct->self = EDICT_TO_PROG(ent);
             pr_global_struct->other = EDICT_TO_PROG(enemy);
@@ -454,11 +492,11 @@ static void hook_apply(edict_t *ent, func_t fnum, const dqsim_hook_observation *
     if (!attacked) {
         /* Animate from the state functions' own frames: run while moving,
          * stand while still, advancing at the QuakeC think cadence. */
-        hook_anim_tick++;
-        if (speed > 0.01f && hook_run_frame >= 0)
-            ent->v.frame = hook_run_frame + (float)((hook_anim_tick / 7) % hook_run_frames);
-        else if (hook_stand_frame >= 0)
-            ent->v.frame = hook_stand_frame + (float)((hook_anim_tick / 7) % 8);
+        slot->anim_tick++;
+        if (speed > 0.01f && slot->run_frame >= 0)
+            ent->v.frame = slot->run_frame + (float)((slot->anim_tick / 7) % slot->run_frames);
+        else if (slot->stand_frame >= 0)
+            ent->v.frame = slot->stand_frame + (float)((slot->anim_tick / 7) % 8);
         ent->v.think = fnum;
         ent->v.nextthink = (float)(sv.time + host_frametime);
     }
@@ -474,49 +512,68 @@ void dq_brain_hook_set_tick(void (*fn)(void))
     hook_tick = fn;
 }
 
+static dq_hook_slot *slot_for_edict(const edict_t *ent)
+{
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++) {
+        dq_hook_slot *slot = &hook_slots[i];
+        if (slot->entity_index && EDICT_NUM(slot->entity_index) == ent)
+            return slot;
+    }
+    return NULL;
+}
+
 void dqsim_hook_execute_program(func_t fnum)
 {
-    /* Level changes clear the nomination (edict indices are per level);
-     * the simulator's load_map calls dq_brain_hook_on_level_start, and
-     * the client - which loads maps through the console - is covered by
-     * this name compare. The client's tick runs first: it records the
-     * stock identity on its first call, which the level start needs. */
-    int level_changed = strcmp(sv.name, hook_level_name) != 0;
-    if (level_changed)
+    /* A new level, or the same map reloaded after a death: both clear
+     * every nomination, because edict indices belong to one episode. The
+     * simulator's load_map calls dq_brain_hook_on_level_start itself; the
+     * client loads maps through the console and is covered by this test.
+     * The client's tick runs first: it records the stock identity on its
+     * first call, which the level start needs. */
+    int level_changed = strcmp(sv.name, hook_level_name) != 0 || sv.edicts != hook_edicts;
+    if (level_changed) {
         q_strlcpy(hook_level_name, sv.name, sizeof(hook_level_name));
-    if (!hook_index && hook_tick)
+        hook_edicts = sv.edicts;
+    }
+    if (hook_tick)
         hook_tick();
     if (level_changed)
         dq_brain_hook_on_level_start();
-    if (hook_callback && hook_index > 0 && fnum > 0 && progs_is_stock) {
-        edict_t *ent = EDICT_NUM(hook_index);
+    dq_hook_slot *slot = NULL;
+    if (progs_is_stock && fnum > 0 && pr_global_struct->self) {
+        edict_t *self = PROG_TO_EDICT(pr_global_struct->self);
+        if (self)
+            slot = slot_for_edict(self);
+    }
+    if (slot) {
+        edict_t *ent = EDICT_NUM(slot->entity_index);
         if (!ent->free && pr_global_struct->self == EDICT_TO_PROG(ent)) {
             /* The pending aim error acts where the shot is actually aimed:
              * the fire think reads the enemy's origin, so offset that
              * origin tangentially for this one execution and restore it. */
-            if (hook_handicap.aim_pending && fnum == hook_fire_think && ent->v.enemy) {
+            if (slot->handicap.aim_pending && fnum == slot->fire_think && ent->v.enemy) {
                 edict_t *enemy = PROG_TO_EDICT(ent->v.enemy);
                 vec3_t saved, delta;
                 VectorCopy(enemy->v.origin, saved);
                 VectorSubtract(enemy->v.origin, ent->v.origin, delta);
                 float distance = sqrtf(delta[0] * delta[0] + delta[1] * delta[1]);
                 if (distance > 1.0f) {
-                    float along = distance * tanf(hook_handicap.aim_yaw_deg *
+                    float along = distance * tanf(slot->handicap.aim_yaw_deg *
                                                   3.14159265f / 180.0f);
                     enemy->v.origin[0] += -delta[1] / distance * along;
                     enemy->v.origin[1] += delta[0] / distance * along;
-                    enemy->v.origin[2] += distance * tanf(hook_handicap.aim_pitch_deg *
+                    enemy->v.origin[2] += distance * tanf(slot->handicap.aim_pitch_deg *
                                                           3.14159265f / 180.0f);
                 }
-                hook_handicap.aim_pending = 0;
+                slot->handicap.aim_pending = 0;
                 PR_ExecuteProgram(fnum);
                 VectorCopy(saved, enemy->v.origin);
                 return;
             }
             if (ent->v.health > 0 && (func_t)ent->v.think == fnum && ent->v.nextthink == 0 &&
-                is_decision_think(fnum)) {
+                is_decision_think(fnum, slot->prefix)) {
                 dqsim_hook_observation obs;
-                hook_observe(ent, &obs);
+                hook_observe(slot->entity_index, ent, &obs);
                 int visible_enemy = -1;
                 for (int i = 0; i < obs.visible_count; i++)
                     if (obs.visible[i].flags & FL_CLIENT) {
@@ -525,14 +582,14 @@ void dqsim_hook_execute_program(func_t fnum)
                     }
                 int reaction_ticks;
                 float aim_error_deg;
-                effective_handicap(&reaction_ticks, &aim_error_deg);
+                effective_handicap(slot, &reaction_ticks, &aim_error_deg);
                 (void)aim_error_deg;
-                int respond = dq_handicap_may_respond(&hook_handicap, visible_enemy, obs.time,
+                int respond = dq_handicap_may_respond(&slot->handicap, visible_enemy, obs.time,
                                                       reaction_ticks, host_frametime);
                 dqsim_hook_action action;
                 memset(&action, 0, sizeof(action));
                 action.desired_yaw = ent->v.angles[YAW];
-                hook_callback(&obs, &action, hook_user);
+                slot->callback(&obs, &action, slot->user);
                 if (!ent->free) {
                     if (!respond) {
                         /* Inside the reaction delay: the callback ran,
@@ -540,13 +597,31 @@ void dqsim_hook_execute_program(func_t fnum)
                         memset(&action, 0, sizeof(action));
                         action.desired_yaw = ent->v.angles[YAW];
                     }
-                    hook_apply(ent, fnum, &obs, &action);
+                    hook_apply(ent, fnum, slot, &obs, &action);
                 }
                 return;
             }
         }
     }
     PR_ExecuteProgram(fnum);
+}
+
+/* The function that starts this class's attack (the hook has no aim-error
+ * target for a monster without one). The Grunt chains "<prefix>atk1..."
+ * and fires from "<prefix>fire"; a melee monster such as the Dog bites
+ * from "<prefix>atta1..." instead, so try the known shapes in order. */
+static func_t find_attack_think(const char *prefix)
+{
+    static const char *const names[] = {"atk1", "atta1", "attack", "melee1"};
+    char name[40];
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
+        q_snprintf(name, sizeof(name), "%s%s", prefix, names[i]);
+        func_t found = find_function(name);
+        if (found)
+            return found;
+    }
+    return 0;
 }
 
 const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callback, void *user)
@@ -565,49 +640,80 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
     const char *classname = ent->free ? "" : PR_GetString(ent->v.classname);
     if (ent->free || strncmp(classname, "monster_", 8) != 0)
         return "the entity is not a monster";
+    if (dq_brain_hook_is_nominated(entity_index))
+        return "the entity is already policy-driven";
 
-    hook_callback = callback;
-    hook_user = user;
-    hook_index = entity_index;
-    hook_anim_tick = 0;
-    hook_skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
+    dq_hook_slot *slot = NULL;
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS && !slot; i++)
+        if (!hook_slots[i].entity_index)
+            slot = &hook_slots[i];
+    if (!slot)
+        return "no free monster slot (DQ_BRAIN_MAX_MONSTERS reached)";
+
+    slot_reset(slot);
+    slot->entity_index = entity_index;
+    slot->callback = callback;
+    slot->user = user;
+    slot->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
     hook_override_ticks = -1;
     hook_override_aim = -1.0f;
-    dq_handicap_reset(&hook_handicap);
-    q_snprintf(hook_prefix, sizeof(hook_prefix), "%s_", classname + 8);
-    hook_fire_think = find_fire_think();
+    q_snprintf(slot->prefix, sizeof(slot->prefix), "%s_", classname + 8);
+    slot->fire_think = find_fire_think(slot->prefix);
+    slot->attack_think = find_attack_think(slot->prefix);
     char name[40];
-    q_snprintf(name, sizeof(name), "%sstand1", hook_prefix);
-    hook_stand_frame = state_frame(find_function(name));
-    q_snprintf(name, sizeof(name), "%srun1", hook_prefix);
-    hook_run_frame = state_frame(find_function(name));
-    hook_run_frames = 0;
+    q_snprintf(name, sizeof(name), "%sstand1", slot->prefix);
+    slot->stand_frame = state_frame(find_function(name));
+    q_snprintf(name, sizeof(name), "%srun1", slot->prefix);
+    slot->run_frame = state_frame(find_function(name));
+    slot->run_frames = 0;
     for (int i = 1; i <= 24; i++) {
-        q_snprintf(name, sizeof(name), "%srun%d", hook_prefix, i);
+        q_snprintf(name, sizeof(name), "%srun%d", slot->prefix, i);
         if (!find_function(name))
             break;
-        hook_run_frames = i;
+        slot->run_frames = i;
     }
-    if (hook_run_frames == 0)
-        hook_run_frames = 1;
+    if (slot->run_frames == 0)
+        slot->run_frames = 1;
     return NULL;
+}
+
+void dq_brain_hook_release(int entity_index)
+{
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index == entity_index)
+            slot_reset(&hook_slots[i]);
 }
 
 void dq_brain_hook_clear(void)
 {
-    hook_callback = NULL;
-    hook_user = NULL;
-    hook_index = 0;
-    hook_fire_think = 0;
-    dq_handicap_reset(&hook_handicap);
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        slot_reset(&hook_slots[i]);
 }
 
 int dq_brain_hook_active(void)
 {
-    return hook_index;
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index)
+            return hook_slots[i].entity_index;
+    return 0;
 }
 
-int dq_brain_hook_skill(void)
+int dq_brain_hook_count(void)
 {
-    return hook_skill;
+    int count = 0;
+
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index)
+            count++;
+    return count;
+}
+
+int dq_brain_hook_is_nominated(int entity_index)
+{
+    if (entity_index <= 0)
+        return 0;
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index == entity_index)
+            return 1;
+    return 0;
 }

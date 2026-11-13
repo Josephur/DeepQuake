@@ -525,7 +525,14 @@ uint64_t dqsim_state_hash(void)
         if (!ent->free)
             hash = dq_fnv1a(hash, &ent->v, fields_size);
     }
-    hash = dq_fnv1a(hash, dq_brain_hook_handicap(), sizeof(*dq_brain_hook_handicap()));
+    /* Every policy-driven monster's handicap, in slot order (M6: a level
+     * can have dozens). This is the hook-owned state, so the deterministic
+     * hash covers what the engine itself decides about handicaps. */
+    dq_handicap_state handicaps[DQ_BRAIN_MAX_MONSTERS];
+    int hook_count = (int)dq_brain_hook_handicaps(handicaps, DQ_BRAIN_MAX_MONSTERS);
+    hash = dq_fnv1a(hash, &hook_count, sizeof(hook_count));
+    for (int i = 0; i < hook_count; i++)
+        hash = dq_fnv1a(hash, &handicaps[i], sizeof(handicaps[i]));
     return hash;
 }
 
@@ -557,7 +564,8 @@ typedef struct dq_snapshot_header {
     uint32_t level_serial;
     char map[64];
     uint64_t rng_state;
-    dq_handicap_state handicap; /* policy-hook handicap state (#34) */
+    int hook_count; /* policy-driven monsters in slot order (M6) */
+    dq_handicap_state handicaps[DQ_BRAIN_MAX_MONSTERS]; /* #34 handicap state */
     double realtime;
     int host_framecount;
     int level_count;
@@ -649,7 +657,7 @@ int dqsim_snapshot_save(dqsim_snapshot **out)
     h->level_serial = level_serial;
     q_strlcpy(h->map, sv.name, sizeof(h->map));
     h->rng_state = dq_rand_state();
-    h->handicap = *dq_brain_hook_handicap();
+    h->hook_count = (int)dq_brain_hook_handicaps(h->handicaps, DQ_BRAIN_MAX_MONSTERS);
     h->realtime = realtime;
     h->host_framecount = host_framecount;
     h->level_count = level_count;
@@ -695,6 +703,12 @@ static int check_snapshot(const dqsim_snapshot *snap)
         return fail("dqsim_snapshot_restore: the snapshot is from a different engine configuration");
     if (snap->header.num_edicts < 1 || snap->header.num_edicts > sv.max_edicts)
         return fail("dqsim_snapshot_restore: the snapshot has an invalid edict count");
+    /* The nominations themselves are process state, not snapshot state; the
+     * handicap states are stored in slot order, so only a snapshot taken
+     * with the same nominations can be applied. */
+    if (snap->header.hook_count != dq_brain_hook_count())
+        return fail("dqsim_snapshot_restore: the snapshot was taken with a different set of "
+                    "policy-driven monsters");
 
     const unsigned char *p = snap->payload;
     const server_t *saved_sv = (const server_t *)p;
@@ -725,7 +739,7 @@ int dqsim_snapshot_restore(const dqsim_snapshot *snapshot)
     memcpy(pr_global_struct, p + h->globals_offset, (size_t)h->numglobals * sizeof(float));
     dq_net_set_state((const dq_net_state *)(p + h->net_offset));
     dq_rand_set_state(h->rng_state);
-    dq_brain_set_handicap_state(&h->handicap);
+    dq_brain_set_handicap_states(h->handicaps, (size_t)h->hook_count);
     memcpy(&cmd_text, p + h->cmd_struct_offset, sizeof(cmd_text));
     if (h->cmd_size)
         memcpy(cmd_text.data, p + h->cmd_offset, h->cmd_size);

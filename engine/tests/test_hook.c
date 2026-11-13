@@ -134,6 +134,92 @@ static uint64_t scenario(void)
     return dqsim_state_hash();
 }
 
+static int seen_multi[3];
+static int multi_ids[3] = {0, 1, 2};
+static float multi_start[3][3];
+static int multi_started[3];
+static int multi_forward;
+
+static void multi_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action,
+                         void *user)
+{
+    int id = *(int *)user;
+    seen_multi[id]++;
+    if (!multi_started[id]) {
+        multi_started[id] = 1;
+        memcpy(multi_start[id], obs->origin, sizeof(multi_start[id]));
+    }
+    if (multi_forward)
+        action->forward = 200.0f;
+}
+
+/* Many monsters at once (M6): three Grunts nominated together, each
+ * driven through its own callback and user pointer, the state hash
+ * covering all of them, and a snapshot carrying each one's handicap. */
+static uint64_t multi_scenario(void)
+{
+    static dqsim_entity entities[1024];
+    const dqsim_action idle = {0};
+    CHECK(dqsim_load_map("e1m1", 0, 11) == DQSIM_OK, "load e1m1");
+    int count = dqsim_get_entities(entities, 1024);
+    int chosen[3], chosen_count = 0;
+    for (int i = 0; i < count && chosen_count < 3; i++)
+        if (strcmp(entities[i].classname, "monster_army") == 0)
+            chosen[chosen_count++] = entities[i].index;
+    CHECK(chosen_count == 3, "only %d Grunts on e1m1", chosen_count);
+
+    memset(seen_multi, 0, sizeof(seen_multi));
+    memset(multi_started, 0, sizeof(multi_started));
+    for (int k = 0; k < 3; k++)
+        CHECK(dqsim_set_policy_hook(chosen[k], multi_policy, &multi_ids[k]) == DQSIM_OK,
+              "nominate %d: %s", chosen[k], dqsim_last_error());
+    CHECK(dqsim_set_policy_hook(chosen[1], multi_policy, &multi_ids[1]) == DQSIM_ERROR,
+          "the same entity was nominated twice");
+
+    multi_forward = 0;
+    CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "warm-up");
+    for (int k = 0; k < 3; k++)
+        CHECK(seen_multi[k] > 0, "monster %d was never asked for a decision", chosen[k]);
+
+    /* Each monster's own callback moves it. */
+    multi_forward = 1;
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "drive all three");
+    count = dqsim_get_entities(entities, 1024);
+    for (int k = 0; k < 3; k++) {
+        int found = 0;
+        float moved = 0;
+        for (int i = 0; i < count; i++)
+            if (entities[i].index == chosen[k]) {
+                found = 1;
+                for (int axis = 0; axis < 2; axis++) {
+                    float delta = entities[i].origin[axis] - multi_start[k][axis];
+                    moved += delta * delta;
+                }
+            }
+        CHECK(found, "monster %d vanished", chosen[k]);
+        CHECK(sqrtf(moved) > 20.0f, "monster %d moved %.1f units", chosen[k], sqrtf(moved));
+    }
+
+    /* The snapshot carries every nominated monster's handicap state. */
+    uint64_t before = dqsim_state_hash();
+    dqsim_snapshot *snap = NULL;
+    CHECK(dqsim_snapshot_save(&snap) == DQSIM_OK, "save: %s", dqsim_last_error());
+    CHECK(dqsim_step_repeat(&idle, 36) == DQSIM_OK, "step after save");
+    CHECK(dqsim_state_hash() != before, "the state did not change");
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore: %s", dqsim_last_error());
+    CHECK(dqsim_state_hash() == before, "restore did not reproduce the hash");
+    dqsim_snapshot_free(snap);
+
+    /* ... and it is refused once the set of nominations differs. */
+    snap = NULL;
+    CHECK(dqsim_snapshot_save(&snap) == DQSIM_OK, "save again: %s", dqsim_last_error());
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_ERROR,
+          "a snapshot with a different nomination set was accepted");
+    dqsim_snapshot_free(snap);
+    return dqsim_state_hash();
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -161,7 +247,16 @@ int main(int argc, char **argv)
         return 1;
     CHECK(first == second, "same seed and inputs gave different hashes");
 
-    printf("hook scenario hash %" PRIu64 "\n", first);
+    uint64_t multi_first = multi_scenario();
+    if (!multi_first)
+        return 1;
+    uint64_t multi_second = multi_scenario();
+    if (!multi_second)
+        return 1;
+    CHECK(multi_first == multi_second, "many monsters: same seed and inputs gave different hashes");
+
+    printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,
+           multi_first);
     dqsim_shutdown();
     return 0;
 }

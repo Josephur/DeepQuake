@@ -167,7 +167,7 @@ mean "a monster we know how to control". Decided:
   evidence that real mods need it; it is not M4 work.
 
 **Implemented (#31):** `dqsim_set_policy_hook` / `dqsim_clear_policy_hook`
-(the Python form is `sim.set_policy_hook`) nominate one monster of the
+(the Python form is `sim.set_policy_hook`) nominate a monster of the
 current level. `sv_phys.c` is compiled with `PR_ExecuteProgram` renamed
 to the hook's entry point — the vendored file itself is unmodified — so
 when the nominated monster's scheduled stand/walk/run think would run,
@@ -189,6 +189,20 @@ simulation is bit-identical (the fidelity test guards this); the
 nomination refuses non-monsters and, per the gate above, a non-stock
 progs. Turning observations into the fair-senses monster observation of
 section 3 is #33, and training a policy on this hook is #35.
+
+**A whole level at once (#46, M6).** The hook keeps a fixed table of 64
+nominations, each with its own callback, user pointer, QuakeC names, animation
+clock, skill and handicap state; the state hash and snapshots carry them all
+in nomination order, and a restore is refused when the set of nominations
+differs. The play client nominates every monster of a class that a loaded
+model covers (`<model>.monsters`, falling back to the Grunt for the sidecar-less
+models-v1 export), each with its own recurrent state, last-seen memory and
+facing, capped by `dq_max_monsters` (0 = all). Measured on e1m1 at 72 Hz: 34
+Grunts driven at 35-40 microseconds per decision with the CUDA provider (41
+with CPU), about 1.3 ms per tick inside a 13.9 ms frame, so per-monster calls
+stay and batched inference waits for a measurement that needs it. id1 gates
+monster counts by skill (e1m1 stocks 18 Grunts at skill 1 and 34 at skill 2),
+which is why the console line, not the map, says how many are driven.
 
 ### 3. Observations and actions
 

@@ -80,7 +80,9 @@ trained monster brain and play against it:
     build/release/bin/deepquake -basedir gamedata -userdir <a-writable-dir> \
         -window +set dq_model models/grunt/grunt.onnx +map e1m1
 
-See [models/README.md](models/README.md).
+Every Grunt in the level is driven by the model (the `dq_max_monsters` cvar
+caps the count; 0, the default, is all of them). See
+[models/README.md](models/README.md).
 
 ## Licence
 

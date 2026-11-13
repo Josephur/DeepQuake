@@ -179,9 +179,14 @@ DQSIM_API int dqsim_get_entities(dqsim_entity *out, int max);
  * has expired — the monster's real QuakeC attack sequence, whose animation
  * and damage then run under QuakeC as usual (as do pain and death
  * sequences). The decision think is rescheduled for the next tick, so the
- * callback runs once per tick. Everything else in the level, including
- * every other monster, runs the stock AI; with no nomination the
- * simulation is unchanged.
+ * callback runs once per tick.
+ *
+ * The brain hook can drive a whole level's worth of monsters (M6): each
+ * dqsim_set_policy_hook call nominates one, up to the engine's fixed
+ * table (64), and every nomination is independent — its own callback,
+ * user pointer, handicap state and animation clock. Everything else in
+ * the level, including any monster with no nomination, runs the stock AI;
+ * with no nomination at all the simulation is unchanged.
  *
  * The gate from #27 applies: a nomination takes effect only while the
  * loaded progs.dat is the stock id1 one. dqsim_set_policy_hook() refuses a
@@ -241,12 +246,14 @@ typedef void (*dqsim_hook_callback)(const dqsim_hook_observation *observation,
  * dqsim_get_entities) as policy-driven, in the current level only; loading
  * a map clears the nomination. The entity must be a monster (classname
  * "monster_*") and the loaded progs.dat must be the stock one (#27), or
- * the call fails and nothing is nominated. Replaces any previous
- * nomination. The callback and user pointer are kept, not copied.
+ * the call fails and nothing is nominated. Calling it again nominates
+ * another monster (up to the table size); nominating the same entity
+ * twice fails rather than replacing its callback. The callback and user
+ * pointer are kept, not copied.
  */
 DQSIM_API int dqsim_set_policy_hook(int entity_index, dqsim_hook_callback callback, void *user);
 
-/* Remove the nomination, if any. Stock AI makes every decision again. */
+/* Remove every nomination. Stock AI makes every decision again. */
 DQSIM_API int dqsim_clear_policy_hook(void);
 
 /*
@@ -278,9 +285,10 @@ typedef struct dqsim_handicap {
 DQSIM_API int dqsim_handicap_for_skill(int skill, dqsim_handicap *out);
 
 /*
- * Override the schedule for the currently nominated monster, for tests:
- * any negative value restores the schedule for that component. The
- * override lasts until cleared or until the next level starts.
+ * Override the schedule for the nominated monster(s), for tests: any
+ * negative value restores the schedule for that component. Applies to
+ * every active nomination (the simulator's tests drive one monster; the
+ * client sets nothing here), and lasts until cleared or the next level.
  */
 DQSIM_API int dqsim_set_handicap_override(int32_t reaction_ticks, float aim_error_deg);
 
