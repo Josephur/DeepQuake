@@ -73,8 +73,14 @@ uv run python -m deepquake.eval_nav runs/nav_e1m1/checkpoint.pt
 
 ## Trained models
 
-Weights are published as GitHub release assets, not stored in git. See
-[models/README.md](models/README.md).
+Weights are published as GitHub release assets, not stored in git. Download a
+trained monster brain and play against it:
+
+    python3 tools/download_model.py grunt
+    build/release/bin/deepquake -basedir gamedata -userdir <a-writable-dir> \
+        -window +set dq_model models/grunt/grunt.onnx +map e1m1
+
+See [models/README.md](models/README.md).
 
 ## Licence
 

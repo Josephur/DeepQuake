@@ -172,6 +172,15 @@ static int load_model(const char *path)
     api->GetDimensions(tensor, shape, dims);
     api->ReleaseTypeInfo(type);
     obs_dim = (int)shape[1];
+    /* The client drives monster policies only (#35): a model with another
+     * observation width is the wrong architecture - refuse it for stock
+     * play with a clear log line instead of feeding it misaligned input. */
+    if (obs_dim != DQ_MONSTER_OBS_DIM) {
+        Con_Printf("deepquake: refusing %s - observation width %d, the client "
+                   "expects %d (wrong architecture?)\n",
+                   path, obs_dim, DQ_MONSTER_OBS_DIM);
+        return -1;
+    }
     return 0;
 }
 

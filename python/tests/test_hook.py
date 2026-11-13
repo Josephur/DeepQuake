@@ -126,3 +126,40 @@ def test_policy_hook_on_generated_map():
     require_gamedata()
     out = run_in_subprocess(GENERATED_MAP, timeout=300)
     _check_drive(out)
+
+
+@pytest.mark.gamedata
+def test_clear_policy_hook_restores_stock_hash():
+    """After clearing a nomination the engine is bit-identical to a run
+    that never had one - the no-model fallback is exact (#44)."""
+    SCENARIO = (
+        POLICY
+        + """
+import json
+from deepquake import sim
+
+sim.init()
+sim.load_map("e1m1", skill=0, seed=7)
+grunt = next(e for e in sim.entities() if e.classname == "monster_army")
+
+# Stock: no nomination at all.
+snap = sim.snapshot_save()
+for _ in range(12):
+    sim.step(repeat=72)
+stock_hash = sim.state_hash()
+
+# Nominated with a do-nothing policy, then cleared: same scenario.
+sim.snapshot_restore(snap)
+sim.set_policy_hook(grunt.index, policy)
+for _ in range(12):
+    sim.step(repeat=72)
+sim.clear_policy_hook()
+sim.snapshot_restore(snap)
+for _ in range(12):
+    sim.step(repeat=72)
+cleared_hash = sim.state_hash()
+print(json.dumps({"stock": stock_hash, "cleared": cleared_hash}))
+"""
+    )
+    out = run_in_subprocess(SCENARIO, timeout=300)
+    assert out["stock"] == out["cleared"]
