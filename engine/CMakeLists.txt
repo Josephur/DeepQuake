@@ -94,9 +94,10 @@ target_compile_options(dqsim_bench PRIVATE -Wall -Wextra -Werror)
 # no client_stubs/platform/net_fake (the real upstream files supply those
 # symbols), and plain sv_phys.c — stock QuakeC decides, until #43 links the
 # brain hook to ONNX inference. Not built in CI (no display, no SDL).
-find_package(OpenGL REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(DQSIM_SDL2 REQUIRED IMPORTED_TARGET sdl2)
+find_package(OpenGL QUIET)
+find_package(PkgConfig QUIET)
+pkg_check_modules(DQSIM_SDL2 IMPORTED_TARGET sdl2)
+if(OpenGL_FOUND AND DQSIM_SDL2_FOUND)
 add_executable(deepquake
   ${QS_DIR}/bgmusic.c
   ${QS_DIR}/cd_sdl.c
@@ -174,6 +175,10 @@ target_compile_options(deepquake PRIVATE -w -fno-strict-aliasing)
 target_link_libraries(deepquake PRIVATE PkgConfig::DQSIM_SDL2 OpenGL::GL m)
 # Fail the build on any undefined engine symbol, like the simulator does.
 target_link_options(deepquake PRIVATE -Wl,-z,defs)
+message(STATUS "DeepQuake client: building (SDL2 ${DQSIM_SDL2_VERSION})")
+else()
+message(STATUS "DeepQuake client: SKIPPED - SDL2 development files or OpenGL not found")
+endif()
 
 if(BUILD_TESTING)
   # Directory containing id1/ for tests that need game data. Those tests
