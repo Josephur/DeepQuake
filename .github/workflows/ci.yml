@@ -46,6 +46,7 @@ jobs:
           # CPU-only PyTorch, so the training tests run here too (the locked
           # 'train' extra would download several GB of CUDA libraries).
           uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install onnxruntime onnx
           uv run --no-sync ruff check .
           uv run --no-sync ruff format --check .
           uv run --no-sync pytest -m "not gamedata and not gpu"
