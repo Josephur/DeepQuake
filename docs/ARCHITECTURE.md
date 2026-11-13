@@ -181,7 +181,20 @@ rescheduled one tick later, so the policy decides every tick; the
 animation frames come from the QuakeC state functions' own frames. An
 attack action with a visible player and QuakeC's `attack_finished`
 expired starts the monster's real QuakeC attack sequence, and attack,
-pain and death sequences always run under QuakeC. The simulator loads an
+pain and death sequences always run under QuakeC.
+
+**The attack entry (#47).** The entry is the first frame of the class's
+attack animation, the function the spawn built-in assigns to the monster's
+`th_melee` field and the stock AI runs when it decides to attack: the
+Grunt's `army_atk1` (chained to `army_fire`) and the Dog's `dog_atta1`, a
+lunge whose chain bites from `dog_bite`. It is found by name — `<prefix>atk1`,
+then `<prefix>atta1`, `attack`, `melee1`. `<Class>CheckAttack` is *not* an
+entry: it is the AI's range classifier, it reads the global `enemy_range`
+that only the stock AI sets, and it starts nothing. Because the bite, not
+the hook, is what checks the range, a policy that attacks can make the Dog
+lunge across a room, but damage lands only at contact distance (measured:
+4 bites in 3 s from 50 units, first after 0.4 s, 7-21 damage each; from
+300 units the dog charges to 73 and lands its first bite there). The simulator loads an
 optional game directory (`dqsim_config.game`, #37), and the progs gate
 compares the level's loaded `progs.dat` against the stock identity read
 from id1 at start-up (`dqsim_progs_is_stock`). With no nomination the

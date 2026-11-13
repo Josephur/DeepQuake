@@ -606,10 +606,15 @@ void dqsim_hook_execute_program(func_t fnum)
     PR_ExecuteProgram(fnum);
 }
 
-/* The function that starts this class's attack (the hook has no aim-error
- * target for a monster without one). The Grunt chains "<prefix>atk1..."
- * and fires from "<prefix>fire"; a melee monster such as the Dog bites
- * from "<prefix>atta1..." instead, so try the known shapes in order. */
+/* The function that starts this class's attack: the first frame of the
+ * attack animation. It is the function the spawn built-in assigns to the
+ * monster's "th_melee" field, which the stock AI runs when it decides to
+ * attack - the Grunt's "army_atk1", which chains to "army_fire", and the
+ * Dog's "dog_atta1", a lunge whose chain bites from "dog_bite" (#47).
+ * "<class>CheckAttack" is *not* that function: it is the AI's range
+ * classifier, it reads the global "enemy_range" that only the stock AI
+ * sets, and it starts nothing. A melee animation is under
+ * "<prefix>atta1...", so try the known shapes in order. */
 static func_t find_attack_think(const char *prefix)
 {
     static const char *const names[] = {"atk1", "atta1", "attack", "melee1"};
