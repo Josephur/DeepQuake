@@ -271,6 +271,7 @@ print(json.dumps({
     "type": [float(v) for v in obs[monster.MONSTER_OBS_BASE_DIM:]],
     "classname": entity.classname,
     "index": env.monster_index,
+    "hooked": env._hook_obs.entity_index,
 }))
 """
 
@@ -281,6 +282,7 @@ def test_the_dog_gets_its_own_type_input():
     require_gamedata()
     out = run_in_subprocess(DOG_EPISODE, timeout=300)
     assert out["classname"] == "monster_dog"
+    assert out["hooked"] == out["index"]  # the hook report came from that Dog
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
     assert out["type"] == [0.0, 1.0]
 

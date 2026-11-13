@@ -112,6 +112,8 @@ def test_export_shared_model_writes_the_class_map(tmp_path):
     spec = export.export_onnx(checkpoint, out, samples=16)
     assert spec["n_types"] == monster.N_MONSTER_TYPES
     assert (tmp_path / "shared.onnx.monsters").read_text() == "monster_army 0\nmonster_dog 1\n"
+    nvec_line = (tmp_path / "shared.onnx.nvec").read_text().splitlines()[0]
+    assert [int(n) for n in nvec_line.split()] == list(monster_env.MONSTER_ACTION_NVEC)
 
     # Parity with the type one-hot set: each row is one body, not a mixture.
     session = onnxruntime.InferenceSession(str(out), providers=["CPUExecutionProvider"])
