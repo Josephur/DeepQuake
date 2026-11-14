@@ -76,6 +76,7 @@ def test_the_manifest_checksums_the_class_map(tmp_path):
                 "monster_army",
                 "monster_ogre",
                 "monster_enforcer",
+                "monster_hell_knight",
             ],
         },
     )
@@ -87,15 +88,17 @@ def test_the_manifest_checksums_the_class_map(tmp_path):
         "monster_dog",
         "monster_enforcer",
         "monster_ogre",
+        "monster_hell_knight",
     ]
     assert manifest["obs_dim"] == monster.MONSTER_OBS_DIM
     assert manifest["action_nvec"] == list(monster_env.MONSTER_ACTION_NVEC)
 
     out_dir = manifest_path.parent
     class_map = (out_dir / "roster.onnx.monsters").read_bytes()
-    assert (
-        class_map.decode() == "monster_army 0\nmonster_dog 1\nmonster_enforcer 2\nmonster_ogre 3\n"
+    expected_map = (
+        "monster_army 0\nmonster_dog 1\nmonster_enforcer 2\nmonster_ogre 3\nmonster_hell_knight 4\n"
     )
+    assert class_map.decode() == expected_map
     assert manifest["monsters_sha256"] == hashlib.sha256(class_map).hexdigest()
     for key, filename in (
         ("onnx_sha256", "roster.onnx"),
