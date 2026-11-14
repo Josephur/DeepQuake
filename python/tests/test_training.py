@@ -435,6 +435,52 @@ def test_the_trainer_warm_starts_and_refuses_a_missing_source(tmp_path):
         )
 
 
+def test_init_head_from_maps_a_new_type_to_a_matched_source_head(tmp_path):
+    """The Hell Knight's head starts from the Enforcer's, not the Ogre's (#55).
+
+    init_from's default rule gives a new type the last source head; a type
+    whose mechanical shape matches another source type better starts from
+    that one, by name, through init_head_from.
+    """
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo, train_monster
+
+    ppo.seed_everything(11)
+    source = ppo.ActorCritic(
+        monster.MONSTER_OBS_BASE_DIM + 4,
+        monster_env.MONSTER_ACTION_NVEC,
+        hidden=8,
+        n_types=4,
+    )
+    # Distinguish the last two heads: the default rule would give the fifth
+    # type (index 4) the last source head (index 3, the Ogre's), the map
+    # gives it the Enforcer's (index 2).
+    torch.nn.init.normal_(source.head_list()[2].weight, std=10.0)
+    torch.nn.init.normal_(source.head_list()[3].weight, std=10.0)
+    path = tmp_path / "four_type.pt"
+    ppo.save_checkpoint(path, source, None, {"total_steps": 10})
+    model = train_monster.build_model(
+        {
+            "init_from": str(path),
+            "init_head_from": {"monster_hell_knight": "monster_enforcer"},
+        },
+        ppo.PPOConfig(hidden=8),
+        torch.device("cpu"),
+    )
+    hell_knight_target = model.head_list()[4]
+    assert torch.equal(hell_knight_target.weight, source.head_list()[2].weight)
+    assert not torch.equal(hell_knight_target.weight, source.head_list()[3].weight)
+    with pytest.raises(SystemExit, match="unknown monster classes"):
+        train_monster.build_model(
+            {
+                "init_from": str(path),
+                "init_head_from": {"monster_hell_knight": "monster_gargantua"},
+            },
+            ppo.PPOConfig(hidden=8),
+            torch.device("cpu"),
+        )
+
+
 def test_a_shared_model_warm_starts_into_a_wider_roster(tmp_path):
     """A two-type checkpoint carries into the three-type roster (#50).
 

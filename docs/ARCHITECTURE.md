@@ -423,14 +423,14 @@ inference call per tick. If a type later proves to be held back by sharing,
 it can be split off and fine-tuned on its own; that direction is easy, the
 reverse is not.
 
-**Implemented (#48, #50, #53)** for the Grunt, the Dog, the Enforcer and
-the Ogre, with
+**Implemented (#48, #50, #53, #55)** for the Grunt, the Dog, the Enforcer,
+the Ogre and the Hell Knight, with
 three simplifications of the design above:
 
 - **The type is a one-hot, appended to the observation**
   (`deepquake.monster.MONSTER_TYPES = (monster_army, monster_dog,
-  monster_enforcer, monster_ogre)`, so `MONSTER_OBS_DIM` is 119 + 4 = 123).
-  The recurrent
+  monster_enforcer, monster_ogre, monster_hell_knight)`, so
+  `MONSTER_OBS_DIM` is 119 + 5 = 124). The recurrent
   cell's input weights play the role of the embedding, and the model keeps a
   single observation input, which is what the client passes.
 - **A policy head per type, one shared value head.** The types have

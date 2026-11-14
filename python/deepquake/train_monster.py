@@ -107,7 +107,22 @@ def build_model(config: dict, ppo_config: ppo.PPOConfig, device) -> ppo.ActorCri
                 f"this run's observation ({model.obs_dim}); warm start from a "
                 f"narrower or equal checkpoint"
             )
-        model.init_from(source)
+        # A new type whose mechanical shape matches one source type better
+        # than the last head does starts from that source's head: the Hell
+        # Knight is a projectile shooter and starts from the Enforcer's
+        # head, not the Ogre's (#55). Names resolve to type indices against
+        # the current vocabulary; unknown names are refused.
+        head_map: dict[int, int] = {}
+        for target_name, source_name in config.get("init_head_from", {}).items():
+            if target_name not in monster.MONSTER_TYPES or source_name not in monster.MONSTER_TYPES:
+                raise SystemExit(
+                    f"init_head_from names unknown monster classes: {target_name!r} -> "
+                    f"{source_name!r}; known types are {monster.MONSTER_TYPES}"
+                )
+            head_map[monster.MONSTER_TYPES.index(target_name)] = monster.MONSTER_TYPES.index(
+                source_name
+            )
+        model.init_from(source, head_map)
     return model
 
 

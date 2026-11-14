@@ -433,3 +433,38 @@ all four classes, so the client check drives them across two maps: e2m1's
 per decision and e1m2's 28 (16 Grunts, 12 Ogres, types 0 and 3) at 50.
 Released as `models-v4` with the four-entry class map (`monster_army 0`,
 `monster_dog 1`, `monster_enforcer 2`, `monster_ogre 3`).
+
+Shared model, fifth type (2026-11-14, #55: `configs/roster7_hknight.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, ogre, hell knight, the observation
+119 + 5 = 124 wide, warm-started from the four-type roster model with the
+new type's head taken from the **Enforcer's** — a new optional
+`init_head_from` maps a new type to the source type whose mechanical shape
+matches; the default rule (the last source head) gave the Hell Knight the
+Ogre's head and 15,000,000 decisions bought only stock parity (74.0% vs
+74.0% at skill 2, `roster6_hknight`, kept as the negative result), while
+the mapped head beat stock within the standard 10,000,896). Trained on the
+union pool plus e2m3/e2m5/e4m5 (the Hell Knight's stocked maps), e3m1/e3m2/
+e3m6 held out; reward stays `damage`. Same M4 evaluation, the Hell Knight
+on its own maps:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps (e2m3/e2m5/e4m5), stock Hell Knight | 64.7% | 68.7% | 74.0% | 76.0% |
+| Training maps, shared model's Hell Knight | 55.3% | 66.7% | **77.3%** | **80.7%** |
+| Held-out e3m6, stock Hell Knight | 74.0% | 90.0% | 86.0% | 86.0% |
+| Held-out e3m6, shared model's Hell Knight | 76.0% | **92.0%** | 84.0% | 86.0% |
+
+The Hell Knight beats the stock Hell Knight at skill 2 on the training maps
+(the #35 bar) and at skill 3; its weak cell is skill 0 (-9.4, the stock
+knight is a 74-92% baseline everywhere). The other four classes do not
+regress: the Dog is ahead of the stock Dog in all 8 cells at both eval
+seeds tried (and the same checkpoint's cells swing up to 14 points between
+seeds, which is the eval's own variance - the seed defines the task set and
+the policy's sampling); the Ogre beats stock at skill 2 and held-out skills
+2/3 (94%/92%); the Enforcer is at 73.0% vs stock 69.0%; the Grunt is at
+62.7% vs stock 62.7% at skill 2 (level, as #51/#53 left it). In the client,
+the five classes are driven across two maps: e2m1's 46 monsters (types 0-2)
+at 51 microseconds per decision and e2m5's 42 (24 Ogres type 3, 18 Hell
+Knights type 4) at 54. Released as `models-v5` with the five-entry class
+map (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`,
+`monster_ogre 3`, `monster_hell_knight 4`).

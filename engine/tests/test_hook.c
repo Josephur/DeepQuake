@@ -744,6 +744,121 @@ static int ogre_throw_aim_error(void)
     return 0;
 }
 
+/* A fifth class through the same hook (#55): the Hell Knight's prefix is
+ * "hknight_" and its ranged attack is the magic missile, fired by
+ * "hknight_shot" from its th_missile chain. The melee axe runs from
+ * th_melee in close. No new mechanism: the spawn-field entries, the
+ * chain-walked fire frames, the facing roll and the sight globals have to
+ * cover it as they cover the Ogre. */
+static int hknight_drive(void)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m5", "monster_hell_knight", &index))
+        return 1;
+
+    float start[3];
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1;
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "hell knight forward");
+    int count = dqsim_get_entities(entities, 2048);
+    int found = 0;
+    float moved = 0;
+    for (int i = 0; i < count; i++)
+        if (entities[i].index == index) {
+            found = 1;
+            for (int k = 0; k < 2; k++) {
+                float delta = entities[i].origin[k] - start[k];
+                moved += delta * delta;
+            }
+        }
+    CHECK(found, "the hell knight vanished");
+    CHECK(sqrtf(moved) > 20.0f, "the hell knight moved %.1f units in 2 s", sqrtf(moved));
+    printf("hell knight: moved %.0f units in 2 s\n", sqrtf(moved));
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The ranged attack: the magic missile must reach the player from well
+ * outside melee range, and the QuakeC chain must gate the pace. */
+static int hknight_attack(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m5", "monster_hell_knight", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(400.0f), "no free spot in the hell knight's sight at 400 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "attack steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the attack");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("hell knight: %d missile hits in 8 s at 400 units, health %.0f -> %.0f\n", hits,
+           before, player.health);
+    CHECK(hits > 0, "the hell knight never damaged the player at range: its missile chain "
+                    "does not fire");
+    CHECK(hits <= 12, "the hell knight hit the player %d times in 8 s: the chain is not gating",
+          hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The aim error reaches the magic missile: the clean and 45-degree windows
+ * are compared by state hash (the missile is not in the sim's entity copy;
+ * same seed and inputs, the only difference is the bent flight). */
+static int hknight_aim_error(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m5", "monster_hell_knight", &index))
+        return 1;
+    CHECK(place_player_visible(400.0f), "no free spot in the hell knight's sight at 400 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+    float before = player.health;
+
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override off: %s",
+          dqsim_last_error());
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "clean steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the clean shots");
+    }
+    float clean_damage = before - player.health;
+    printf("hell knight: %.0f damage clean in 8 s\n", clean_damage);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+
+    if (driven_start("e2m5", "monster_hell_knight", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 45.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(400.0f), "no free spot in the hell knight's sight at 400 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range for the error window");
+    before = player.health;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "aim error steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the aim error");
+    }
+    float missed = before - player.health;
+    printf("hell knight: %.0f damage with a 45 degree aim error\n", missed);
+    CHECK(missed < 5.0f, "the hell knight did %.0f damage with a 45 degree aim error", missed);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -783,7 +898,8 @@ int main(int argc, char **argv)
         return 1;
 
     if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack() ||
-        ogre_throw() || ogre_throw_aim_error())
+        ogre_throw() || ogre_throw_aim_error() || hknight_drive() || hknight_attack() ||
+        hknight_aim_error())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

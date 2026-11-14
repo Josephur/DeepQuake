@@ -158,7 +158,7 @@ class ActorCritic(nn.Module):
         entropy = torch.stack([d.entropy() for d in dists]).sum(0)
         return log_prob, entropy, self.value(hidden)
 
-    def init_from(self, source: ActorCritic) -> None:
+    def init_from(self, source: ActorCritic, head_map: dict[int, int] | None = None) -> None:
         """Warm start from another network: take its trunk, keep its behaviour.
 
         Every shared parameter is copied. When this network is wider (the
@@ -168,6 +168,10 @@ class ActorCritic(nn.Module):
         the old brain instead of from nothing. Each per-type head takes the
         source's head of the same index, or its only head when the source had
         one, so a second type also starts from the first type's policy.
+        ``head_map`` overrides that per target index ({target: source}), for
+        a new type whose mechanical shape matches one source type better than
+        the last head does — the Hell Knight starts from the Enforcer's head,
+        not the Ogre's (#55).
         """
         with torch.no_grad():
             source_gru = dict(source.gru.named_parameters())
@@ -184,8 +188,15 @@ class ActorCritic(nn.Module):
                         f"cannot warm start {name}: {tuple(origin.shape)} -> {tuple(target.shape)}"
                     )
             origins = source.head_list()
+            head_map = head_map or {}
             for index, head in enumerate(self.head_list()):
-                head.load_state_dict(origins[min(index, len(origins) - 1)].state_dict())
+                origin_index = head_map.get(index, min(index, len(origins) - 1))
+                if not 0 <= origin_index < len(origins):
+                    raise ValueError(
+                        f"head_map maps type index {index} to source index {origin_index}, "
+                        f"but the source has {len(origins)} head(s)"
+                    )
+                head.load_state_dict(origins[origin_index].state_dict())
             self.value_head.load_state_dict(source.value_head.state_dict())
 
     def spec(self) -> dict:
