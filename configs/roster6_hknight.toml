@@ -1,0 +1,68 @@
+# The five-type roster run (#55): one shared policy for the Grunt, the Dog,
+# the Enforcer, the Ogre and the Hell Knight, warm started from the four-type
+# roster model. The trunk and the recurrent core are shared; the monster type
+# comes in as a one-hot appended to the observation
+# (deepquake.monster.MONSTER_TYPES), and each type has its own policy head,
+# so one ONNX model can drive a mixed level.
+#
+# Reward: "damage" (the #51 fix) - the dense (dealt - taken)/100 per-step term
+# is what keeps the Dog committing to closing; reverting to the sparse
+# terminal reward would undo the melee fix.
+#
+# Maps: the union of the class pools. e1m1/e2m1/e4m1 (Grunt, Dog, Enforcer),
+# e1m2/e2m2/e4m2 (Ogre), e2m3/e2m5/e4m5 (Hell Knight, 16/18/14 of them per
+# the #55 groundwork). No Hell Knight map overlaps the previous pools, so the
+# Hell Knight's training episodes come only from the new maps, and the older
+# classes keep training on their own pools (on Hell-Knight-only maps their
+# bodies would get zero episodes and the shared trunk would drift away from
+# them). Held out: e3m1 (the existing classes' held-out map, unchanged since
+# #48), e3m2 (the Ogre's, from #53) and e3m6 (the Hell Knight's, 15 of them,
+# the m3/e6 slot in the same per-family rule).
+#   uv run python -m deepquake.train_monster configs/roster6_hknight.toml
+name = "roster6_hknight"
+monsters = [
+  "monster_army",
+  "monster_dog",
+  "monster_enforcer",
+  "monster_ogre",
+  "monster_hell_knight",
+]
+# The four-type roster checkpoint: its GRU, its policy heads and its value
+# head are copied, the new type column is zeroed, so the shared network
+# starts out playing exactly like the released model. The Hell Knight's head
+# starts from the last source head (the Ogre's), which init_from does by
+# index.
+init_from = "runs/roster5_ogre/checkpoint.pt"
+maps = ["e1m1", "e2m1", "e4m1", "e1m2", "e2m2", "e4m2", "e2m3", "e2m5", "e4m5"]
+held_out = ["e3m1", "e3m2", "e3m6"]
+envs = 6
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "damage"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
