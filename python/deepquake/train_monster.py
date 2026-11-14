@@ -78,8 +78,11 @@ def build_model(config: dict, ppo_config: ppo.PPOConfig, device) -> ppo.ActorCri
     A run that lists more than one class, or any run at all once the shared
     layout exists, builds :class:`ppo.ActorCritic` with one head per type.
     ``init_from`` names a checkpoint to warm start from — the Grunt's
-    ``runs/grunt_pool/checkpoint.pt`` in the roster run — so the shared
-    network starts as the old brain and the fine-tune moves it.
+    ``runs/grunt_pool/checkpoint.pt`` in the roster run, the two-type roster
+    model in the three-type run (#50) — so the shared network starts as the
+    old brain and the fine-tune moves it. The source may be narrower (its
+    extra observation columns are zeroed and its heads carry over), but not
+    wider.
     """
     model = ppo.ActorCritic(
         monster.MONSTER_OBS_DIM,
@@ -98,10 +101,11 @@ def build_model(config: dict, ppo_config: ppo.PPOConfig, device) -> ppo.ActorCri
                 f"source run's checkpoint.pt (omit init_from to train from scratch)"
             )
         source, _saved = ppo.load_model(source_path, device)
-        if source.obs_dim > monster.MONSTER_OBS_BASE_DIM:
+        if source.obs_dim > model.obs_dim:
             raise SystemExit(
-                f"init_from {source_path} is a shared-type model (obs_dim "
-                f"{source.obs_dim}); warm start from a single-type checkpoint"
+                f"init_from {source_path} is wider (obs_dim {source.obs_dim}) than "
+                f"this run's observation ({model.obs_dim}); warm start from a "
+                f"narrower or equal checkpoint"
             )
         model.init_from(source)
     return model

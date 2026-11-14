@@ -42,8 +42,8 @@ slice                 size   meaning
 ``[114]``             1      1 while a last-seen position is remembered
 ``[115]``             1      skill / 3 (Quake's ``skill``, 0-3)
 ``[116:119]``         3      style: aggression, caution, stealth (0-1)
-``[119:121]``         2      monster type, one-hot in :data:`MONSTER_TYPES`
-                             order (0: Grunt, 1: Dog)
+``[119:122]``         3      monster type, one-hot in :data:`MONSTER_TYPES`
+                             order (0: Grunt, 1: Dog, 2: Enforcer)
 ====================  =====  ==============================================
 
 One observer serves one monster for one episode: call
@@ -51,11 +51,13 @@ One observer serves one monster for one episode: call
 vector is deterministic — the same sequence of hook reports always gives
 the same vectors.
 
-The type input is what lets one network serve every monster type (#48):
-the observation gives the shared trunk the body the policy is wearing, and
-the network's per-type output head is selected from the same one-hot. It is
-appended rather than prepended so a network trained on the 119-wide layout
-warm-starts by copying its input columns unchanged.
+The type input is what lets one network serve every monster type (#48,
+#50): the observation gives the shared trunk the body the policy is wearing,
+and the network's per-type output head is selected from the same one-hot. It
+is appended rather than prepended so a network trained on the 119-wide layout
+warm-starts by copying its input columns unchanged. The Enforcer joins as
+the third type: the hook reaches it (#49), so all it needed was its place in
+this vocabulary.
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ from . import sim
 N_RAYS = len(sim.HOOK_RAY_PITCHES) * sim.HOOK_RAY_YAWS
 #: The shared network's type vocabulary, in index order. The client's
 #: ``<model>.onnx.monsters`` sidecar maps a classname to this index.
-MONSTER_TYPES = ("monster_army", "monster_dog")
+MONSTER_TYPES = ("monster_army", "monster_dog", "monster_enforcer")
 N_MONSTER_TYPES = len(MONSTER_TYPES)
 MONSTER_OBS_BASE_DIM = 2 * N_RAYS + 23
 MONSTER_OBS_DIM = MONSTER_OBS_BASE_DIM + N_MONSTER_TYPES

@@ -401,33 +401,34 @@ inference call per tick. If a type later proves to be held back by sharing,
 it can be split off and fine-tuned on its own; that direction is easy, the
 reverse is not.
 
-**Implemented (#48)** for the Grunt and the Dog, with three simplifications
-of the design above:
+**Implemented (#48, #50)** for the Grunt, the Dog and the Enforcer, with
+three simplifications of the design above:
 
 - **The type is a one-hot, appended to the observation**
-  (`deepquake.monster.MONSTER_TYPES = (monster_army, monster_dog)`, so
-  `MONSTER_OBS_DIM` is 119 + 2 = 121). The recurrent cell's input weights
-  play the role of the embedding, and the model keeps a single observation
-  input, which is what the client passes.
-- **A policy head per type, one shared value head.** The Grunt and the Dog
-  have the same action layout today, so the heads differ only in weights.
+  (`deepquake.monster.MONSTER_TYPES = (monster_army, monster_dog,
+  monster_enforcer)`, so `MONSTER_OBS_DIM` is 119 + 3 = 122). The recurrent
+  cell's input weights play the role of the embedding, and the model keeps a
+  single observation input, which is what the client passes.
+- **A policy head per type, one shared value head.** The three types have
+  the same action layout today, so the heads differ only in weights.
   The head is selected by multiplying each head's logits by the
   observation's one-hot and summing, not by an index gather, so the ONNX
   graph has no second input derived from the observation.
 - **Inference is per monster, not batched.** The client runs one session
-  for every Grunt and Dog in the level, but one inference call per
+  for every Grunt, Dog and Enforcer in the level, but one inference call per
   decision, each monster with its own recurrent state and type index.
   Batching all monsters into one call per tick is still to do.
 
-A second type **warm-starts** from the first: `ActorCritic.init_from`
-copies the Grunt's recurrent cell (with zeroed input columns for the new
-one-hot entries), its policy head into every type's head and its value
-head, so the shared model starts out playing exactly like the Grunt model
-(a unit test checks actions, log-probabilities, value and hidden state are
-identical for both one-hots). Training then samples the body per episode,
-so both types train together. The exported model ships a class map,
-`<model>.onnx.monsters` (`classname type_index` per line), which tells the
-client which classes it drives; a 119-wide v1 model without one still
+A new type **warm-starts** from the previous roster: `ActorCritic.init_from`
+copies the source's recurrent cell (with zeroed input columns for the new
+one-hot entries), each source head into the head of the same index — the
+last source head when the source had fewer types — and its value head, so
+the shared model starts out playing exactly like the model it came from (a
+unit test checks actions, log-probabilities, value and hidden state are
+identical for the carried-over one-hots). Training then samples the body per
+episode, so all three types train together. The exported model ships a class
+map, `<model>.onnx.monsters` (`classname type_index` per line), which tells
+the client which classes it drives; a 119-wide v1 model without one still
 loads as the Grunt policy.
 
 ### 5. Training — `python/deepquake/`

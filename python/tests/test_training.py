@@ -435,6 +435,50 @@ def test_the_trainer_warm_starts_and_refuses_a_missing_source(tmp_path):
         )
 
 
+def test_a_shared_model_warm_starts_into_a_wider_roster(tmp_path):
+    """A two-type checkpoint carries into the three-type roster (#50).
+
+    The roster run warm starts from the Grunt's single-type model; the
+    three-type run warm starts from the two-type roster model, so the
+    Grunt's and the Dog's heads carry over and the new type's column is
+    zeroed.
+    """
+    torch = pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env, ppo, train_monster
+
+    ppo.seed_everything(9)
+    source = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM - 1,
+        monster_env.MONSTER_ACTION_NVEC,
+        hidden=8,
+        n_types=monster.N_MONSTER_TYPES - 1,
+    )
+    path = tmp_path / "roster.pt"
+    ppo.save_checkpoint(
+        path,
+        source,
+        None,
+        {"total_steps": 10, "monsters": ["monster_army", "monster_dog"]},
+    )
+    model = train_monster.build_model(
+        {"init_from": str(path)}, ppo.PPOConfig(hidden=8), torch.device("cpu")
+    )
+    assert model.n_types == monster.N_MONSTER_TYPES
+
+    # The trunk took the source's input columns and zeroed the new one.
+    assert torch.equal(model.gru.weight_ih_l0[:, : source.obs_dim], source.gru.weight_ih_l0)
+    assert torch.count_nonzero(model.gru.weight_ih_l0[:, source.obs_dim :]) == 0
+
+    # Each old type keeps its own head; the new type starts from the last
+    # source head, which is init_from's rule.
+    source_heads = source.head_list()
+    heads = model.head_list()
+    assert len(heads) == monster.N_MONSTER_TYPES
+    for index in range(len(source_heads)):
+        assert torch.equal(heads[index].weight, source_heads[index].weight)
+    assert torch.equal(heads[-1].weight, source_heads[-1].weight)
+
+
 def test_the_memory_persists_across_rollouts():
     """A worker's recurrent state carries from one rollout into the next."""
     pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")

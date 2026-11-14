@@ -161,6 +161,9 @@ class MonsterEnv:
             raise ValueError("monsters must name at least one monster class")
         self.map_name = map_name
         self.monster = self.monsters[0]
+        #: The trained classes the current level stocks (#50); the body of
+        #: an episode is sampled from these.
+        self.available: tuple[str, ...] = self.monsters
         self.opponent = (opponent or PlayerOpponent("shooter")).build(seed * 1000 + 777)
         self.timeout_steps = timeout_steps
         self.min_distance = min_distance
@@ -207,9 +210,20 @@ class MonsterEnv:
     # -- episode lifecycle ----------------------------------------------
 
     def _fresh_load(self, load_seed: int, skill: int) -> list[sim.Entity]:
+        """Load the level and return its monsters.
+
+        All of them, not only the class of the episode: the body is chosen
+        from the classes the level stocks (#50), so a run that names a class
+        a level does not have still trains on that level.
+        """
         sim.load_map(self.map_name, skill=skill, seed=load_seed)
         sim.step(repeat=2)
-        return [e for e in sim.entities() if e.classname == self.monster]
+        return [e for e in sim.entities() if e.classname.startswith("monster_")]
+
+    def _available_classes(self, monsters: list[sim.Entity]) -> list[str]:
+        """The trained classes this level stocks, in the run's order."""
+        stocked = {e.classname for e in monsters}
+        return [name for name in self.monsters if name in stocked]
 
     def _monster_entity(self) -> sim.Entity | None:
         for entity in sim.entities():
@@ -254,8 +268,11 @@ class MonsterEnv:
         task_seed: int,
         skill: int,
         style: tuple[float, float, float],
+        monsters: list[sim.Entity] | None = None,
     ) -> np.ndarray:
-        candidates = self._fresh_load(load_seed, skill)
+        if monsters is None:
+            monsters = self._fresh_load(load_seed, skill)
+        candidates = [e for e in monsters if e.classname == self.monster]
         if not candidates:
             raise RuntimeError(f"no {self.monster} on {self.map_name}")
         chosen = candidates[monster_choice % len(candidates)]
@@ -289,19 +306,28 @@ class MonsterEnv:
 
     def reset(self) -> np.ndarray:
         for _attempt in range(20):
-            # Training with a shared policy samples the body per episode, so
-            # one network sees every class it was trained for (#48).
-            self.monster = self.monsters[int(self.rng.integers(len(self.monsters)))]
+            # The level is loaded first, so the body can be chosen from the
+            # classes it stocks: a level without the Enforcer (e1m1) must not
+            # spend an episode failing to find one (#50).
+            load_seed = int(self.rng.integers(2**31))
+            skill = int(self.rng.choice(self.skills))
+            style = self.styles[int(self.rng.integers(len(self.styles)))]
+            monsters = self._fresh_load(load_seed, skill)
+            self.available = tuple(self._available_classes(monsters))
+            if not self.available:
+                continue
+            self.monster = self.available[int(self.rng.integers(len(self.available)))]
             try:
                 return self._start(
-                    int(self.rng.integers(2**31)),
+                    load_seed,
                     int(self.rng.integers(64)),
                     int(self.rng.integers(2**31)),
-                    int(self.rng.choice(self.skills)),
-                    self.styles[int(self.rng.integers(len(self.styles)))],
+                    skill,
+                    style,
+                    monsters,
                 )
             except RuntimeError:
-                continue  # a load with no monster, or no usable start: reroll
+                continue  # no usable start: reroll
         raise RuntimeError("no usable monster episode start found")
 
     def set_task(
@@ -313,7 +339,9 @@ class MonsterEnv:
         style: tuple[float, float, float] = DEFAULT_STYLE,
     ) -> np.ndarray:
         """Begin a deterministic episode from the training placement."""
-        return self._start(load_seed, monster_choice, task_seed, int(skill), tuple(style))
+        monsters = self._fresh_load(load_seed, int(skill))
+        self.available = tuple(self._available_classes(monsters))
+        return self._start(load_seed, monster_choice, task_seed, int(skill), tuple(style), monsters)
 
     # -- one decision ----------------------------------------------------
 

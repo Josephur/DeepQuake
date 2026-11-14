@@ -312,9 +312,9 @@ covers every shot of an attack, so a class that fires twice (the Enforcer)
 is handicapped on both shots instead of keeping an exact second one.
 
 The **Remaining monster types** item is **not** ticked: the Enforcer's hook
-path is proved, but it has not joined the shared model yet — that is the
-next issue (three types, one network, release `models-v3`), and the item
-covers every remaining type.
+path is proved (#49) and the Enforcer has joined the shared model (#50,
+below), but the item covers every remaining type — the Ogre, the Fiend, the
+Shambler, the Hell Knight and the rest are still stock.
 
 Shared model, second type (2026-11-13, #48: `configs/roster_pool.toml`,
 one network for the Grunt and the Dog, type one-hot appended to the
@@ -340,3 +340,47 @@ Grunt does not regress after sharing (within -2.7 to +4.0 points of the
 single-type model, 5 cells up, 2 down, 1 equal; about one standard error).
 In the client, `roster` drives all 42 Grunts and Dogs of e1m1 from one
 session at 45-46 microseconds per decision (the v1 Grunt model: 32).
+
+Shared model, third type (2026-11-13, #50: `configs/roster3_pool.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, the observation 119 + 3 = 122 wide,
+warm-started from the two-type roster model and fine-tuned 10,000,896
+decisions on e1m1/e2m1/e4m1 with all three bodies sampled per episode,
+e3m1 held out). An episode's body is sampled from the classes the level
+stocks — e1m1 has no Enforcer, so sampling one there only wasted episodes
+(#50). Same evaluation as M4 (50 fixed tasks per map and skill, trained
+player opponent); the stock rows reproduce the table above exactly, which
+confirms the protocol did not move:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps, stock Grunt | 41.3% | 49.3% | 62.7% | 76.7% |
+| Training maps, shared model's Grunt | 40.0% | 51.3% | 61.3% | 70.7% |
+| Training maps, stock Dog | 46.7% | 52.0% | 63.3% | 65.3% |
+| Training maps, shared model's Dog | 57.3% | 64.7% | 70.7% | 76.0% |
+| Training maps (e2m1/e4m1), stock Enforcer | 42.0% | 55.0% | 69.0% | 69.0% |
+| Training maps (e2m1/e4m1), shared model's Enforcer | 46.0% | 53.0% | 70.0% | 73.0% |
+| Held-out e3m1, stock Grunt | 58.0% | 80.0% | 78.0% | 78.0% |
+| Held-out e3m1, shared model's Grunt | 68.0% | 76.0% | 86.0% | 74.0% |
+| Held-out e3m1, stock Dog | 72.0% | 90.0% | 76.0% | 74.0% |
+| Held-out e3m1, shared model's Dog | 84.0% | 88.0% | 84.0% | 84.0% |
+| Held-out e3m1, stock Enforcer | 82.0% | 74.0% | 84.0% | 88.0% |
+| Held-out e3m1, shared model's Enforcer | 68.0% | 74.0% | 82.0% | 86.0% |
+
+Against the two-type roster model, per cell of the difference: the Dog is
+up in 5 of 8 cells (+6.0 to +8.7 on the training maps, +8.0 held out at
+skill 0), equal in one, down in two (-2.0, -4.0 held out). The Grunt's
+deltas run -5.3 to +10.0, mixed in sign within every map and skill (e2m1
+up at skill 0/1 and down at 2/3, e4m1 the reverse), -2.9 points on average
+over the 16 per-map cells (-1.4 over the 8 group cells); every cell of
+both classes is within about one
+standard error of the difference, which is the noise floor here, not a
+regression with a direction. The Enforcer beats the stock Enforcer at
+skill 2 on the training maps — 70.0% against 69.0%, the #35 bar — by one
+task in a hundred, so call it parity with the stock Enforcer rather than a
+win: ahead of stock at skills 0 and 3 on the training maps, behind only at
+held-out skill 0 (-14.0, one standard error at 50 tasks). The Enforcer's
+mean time to first damage is shorter than stock's in 5 of 8 cells (it
+engages sooner). In the client, the model drives e3m1's 64 monsters of all
+three classes from one session (34 Grunts, 9 Dogs, 21 Enforcers) at 50-51
+microseconds per decision. Released as `models-v3` with the three-entry
+class map (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`).

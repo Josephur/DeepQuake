@@ -40,7 +40,7 @@ def _client(relative=(100.0, 0.0, 0.0), health=100.0):
 def test_layout_and_conditioning_inputs():
     observer = monster.MonsterObserver(skill=3, style=(0.0, 0.5, 1.0))
     obs = observer.observe(_hook())
-    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (121,)
+    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (122,)
     assert obs[BASE + 19] == 1.0  # skill 3 / 3
     assert list(obs[BASE + 20 : BASE + 23]) == [0.0, 0.5, 1.0]
     assert obs[BASE + 4] == pytest.approx(0.8)  # own health
@@ -51,16 +51,21 @@ def test_layout_and_conditioning_inputs():
 
 
 def test_monster_type_is_a_one_hot_at_the_end():
-    """The type input of the shared model (#48): one-hot, same for every tick."""
-    assert monster.MONSTER_TYPES == ("monster_army", "monster_dog")
+    """The type input of the shared model (#48, #50): one-hot, same for every tick."""
+    assert monster.MONSTER_TYPES == ("monster_army", "monster_dog", "monster_enforcer")
     army = monster.MonsterObserver(monster_type="monster_army").observe(_hook())
     dog = monster.MonsterObserver(monster_type="monster_dog").observe(_hook())
+    enforcer = monster.MonsterObserver(monster_type="monster_enforcer").observe(_hook())
     type_slice = slice(monster.MONSTER_OBS_BASE_DIM, monster.MONSTER_OBS_DIM)
-    assert list(army[type_slice]) == [1.0, 0.0]
-    assert list(dog[type_slice]) == [0.0, 1.0]
+    assert list(army[type_slice]) == [1.0, 0.0, 0.0]
+    assert list(dog[type_slice]) == [0.0, 1.0, 0.0]
+    assert list(enforcer[type_slice]) == [0.0, 0.0, 1.0]
     # Nothing else depends on the type: the rest of the vector is identical.
     np.testing.assert_array_equal(
         army[: monster.MONSTER_OBS_BASE_DIM], dog[: monster.MONSTER_OBS_BASE_DIM]
+    )
+    np.testing.assert_array_equal(
+        army[: monster.MONSTER_OBS_BASE_DIM], enforcer[: monster.MONSTER_OBS_BASE_DIM]
     )
     with pytest.raises(ValueError, match="monster type"):
         monster.MonsterObserver(monster_type="monster_ogre")
@@ -284,7 +289,72 @@ def test_the_dog_gets_its_own_type_input():
     assert out["classname"] == "monster_dog"
     assert out["hooked"] == out["index"]  # the hook report came from that Dog
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 1.0]
+    assert out["type"] == [0.0, 1.0, 0.0]
+
+
+ENFORCER_EPISODE = """
+import json
+from deepquake import monster, monster_env, sim
+
+sim.init()
+env = monster_env.MonsterEnv(
+    "e2m1", seed=5, monster="monster_enforcer",
+    opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
+)
+obs = env.set_task(*(monster_env.make_tasks(env, 1, 78)[0]))
+entity = env._monster_entity()
+print(json.dumps({
+    "shape": list(obs.shape),
+    "type": [float(v) for v in obs[monster.MONSTER_OBS_BASE_DIM:]],
+    "classname": entity.classname,
+    "index": env.monster_index,
+    "hooked": env._hook_obs.entity_index,
+}))
+"""
+
+
+@pytest.mark.gamedata
+def test_the_enforcer_gets_its_own_type_input():
+    """An Enforcer episode is hooked and carries the Enforcer one-hot (#50)."""
+    require_gamedata()
+    # e2m1's walk graph takes a while to build, and the episode needs it.
+    out = run_in_subprocess(ENFORCER_EPISODE, timeout=900)
+    assert out["classname"] == "monster_enforcer"
+    assert out["hooked"] == out["index"]  # the hook report came from that Enforcer
+    assert out["shape"] == [monster.MONSTER_OBS_DIM]
+    assert out["type"] == [0.0, 0.0, 1.0]
+
+
+NO_ENFORCER_EPISODES = """
+import json
+from deepquake import monster_env, sim
+
+sim.init()
+# e1m1 stocks the Grunt and the Dog, but no Enforcer.
+env = monster_env.MonsterEnv(
+    "e1m1", seed=6,
+    monsters=("monster_army", "monster_dog", "monster_enforcer"),
+    opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
+)
+seen = []
+for _ in range(6):
+    env.reset()
+    seen.append(env.monster)
+print(json.dumps({"seen": seen, "available": list(env.available)}))
+"""
+
+
+@pytest.mark.gamedata
+def test_an_episode_never_wears_a_class_the_level_does_not_stock():
+    """e1m1 stocks no Enforcer, so the body comes from the rest (#50).
+
+    Sampling the Enforcer there would spend an episode failing to find one
+    and reloading the level, for every third episode.
+    """
+    require_gamedata()
+    out = run_in_subprocess(NO_ENFORCER_EPISODES, timeout=900)
+    assert out["available"] == ["monster_army", "monster_dog"]
+    assert "monster_enforcer" not in out["seen"]
 
 
 MIXED_EPISODES = """
@@ -292,12 +362,14 @@ import json
 from deepquake import monster_env, sim
 
 sim.init()
+# e3m1 stocks all three classes: the Grunt, the Dog and the Enforcer.
 env = monster_env.MonsterEnv(
-    "e1m1", seed=4, monsters=("monster_army", "monster_dog"),
+    "e3m1", seed=4,
+    monsters=("monster_army", "monster_dog", "monster_enforcer"),
     opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
 )
 seen = []
-for _ in range(6):
+for _ in range(12):
     env.reset()
     seen.append(env.monster)
 print(json.dumps(seen))
@@ -305,11 +377,11 @@ print(json.dumps(seen))
 
 
 @pytest.mark.gamedata
-def test_a_shared_run_samples_both_types():
-    """Training samples the body per episode, so one network sees both (#48)."""
+def test_a_shared_run_samples_every_type():
+    """Training samples the body per episode, so one network sees all (#48, #50)."""
     require_gamedata()
-    seen = run_in_subprocess(MIXED_EPISODES, timeout=600)
-    assert set(seen) == {"monster_army", "monster_dog"}
+    seen = run_in_subprocess(MIXED_EPISODES, timeout=900)
+    assert set(seen) == {"monster_army", "monster_dog", "monster_enforcer"}
 
 
 MONSTER_EPISODE = """

@@ -1,0 +1,56 @@
+# The three-type roster run (#50): one shared policy for the Grunt, the Dog
+# and the Enforcer, warm started from the two-type roster model. The trunk
+# and the recurrent core are shared; the monster type comes in as a one-hot
+# appended to the observation (deepquake.monster.MONSTER_TYPES), and each type
+# has its own policy head, so one ONNX model can drive a mixed level. The
+# fine-tune is combined (not Enforcer-only): all three bodies train together,
+# so the trunk does not drift away from the Grunt and the Dog while the
+# Enforcer learns.
+#
+# Maps: the same split as configs/roster_pool.toml - e1m1 (34 Grunts/8 Dogs),
+# e2m1 (11 Grunts/5 Dogs/17 Enforcers) and e4m1 (29/5/14) train, e3m1
+# (32/6/17) is held out. The held-out map stocks all three classes, so the
+# Enforcer is measured on a map it never trained on. Placement, opponents,
+# skills, styles, reward and PPO settings are unchanged from the roster run,
+# so the difference measured is the third type, not a different task.
+#   uv run python -m deepquake.train_monster configs/roster3_pool.toml
+name = "roster3_pool"
+monsters = ["monster_army", "monster_dog", "monster_enforcer"]
+# The two-type roster checkpoint: its GRU, its policy heads and its value head
+# are copied, the new type column is zeroed, so the shared network starts by
+# playing exactly like the released roster model. The Enforcer's head starts
+# from the last source head (the Dog's), which init_from does by index.
+init_from = "runs/roster_pool/checkpoint.pt"
+maps = ["e1m1", "e2m1", "e4m1"]
+held_out = ["e3m1"]
+envs = 6
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "sparse"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
