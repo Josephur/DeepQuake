@@ -403,7 +403,7 @@ def test_monster_list_covers_every_type_in_one_run():
     assert train_monster.monster_list({"monster": "monster_dog"}) == ["monster_dog"]
     assert train_monster.monster_list({}) == ["monster_army"]
     with pytest.raises(ValueError, match="unknown monster classes"):
-        train_monster.monster_list({"monsters": ["monster_ogre"]})
+        train_monster.monster_list({"monsters": ["monster_shambler"]})
 
 
 def test_the_trainer_warm_starts_and_refuses_a_missing_source(tmp_path):

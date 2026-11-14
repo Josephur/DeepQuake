@@ -384,3 +384,52 @@ engages sooner). In the client, the model drives e3m1's 64 monsters of all
 three classes from one session (34 Grunts, 9 Dogs, 21 Enforcers) at 50-51
 microseconds per decision. Released as `models-v3` with the three-entry
 class map (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`).
+
+The melee commitment was fixed first (2026-11-14, #51: `configs/roster4_damage.toml`,
+the same three-type roster trained with the dense `damage` reward instead of
+the sparse terminal one). Under the sparse reward the Dog never committed to
+closing — its back commands outweighed ahead commands 2.9x (the two-type
+model) and 7.6x (the three-type one), the attack bit did all the closing and
+the explicit movement cancelled it between lunges, and it crept at the player
+without biting. Under the damage reward the sign flips (114:213), the probe
+kills rise from 1/8 to 5/8, and the Dog is ahead of the stock Dog in all 8
+evaluation cells (held-out 96%/98% at skills 1/3); the Grunt and Enforcer
+bars still pass. Released unchanged as part of `models-v4`.
+
+Shared model, fourth type (2026-11-14, #53: `configs/roster5_ogre.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, ogre, the observation 119 + 4 = 123
+wide, warm-started from the damage-reward three-type model and fine-tuned
+10,000,896 decisions on the union of the two class pools - e1m1/e2m1/e4m1
+for the Grunt, Dog and Enforcer, e1m2/e2m2/e4m2 for the Ogre (no Ogre map
+overlaps the previous four), e3m1 and e3m2 held out; reward stays `damage`,
+everything else as before). The hook change that made the Ogre drivable:
+the attack entries come from the spawn's own `th_melee`/`th_missile` fields
+(the throw lived only in `th_missile`, unreachable from a name-shaped
+probe), the ranged entry is the spawn's `th_missile` only when its chain
+reaches a shot (the Dog's is a one-shot pounce), fire frames are found by
+walking the attack chains, a shot function is one whose name contains `fire`
+or `shot`, the aim error also rolls the monster's facing (the grenade aims
+from `makevectors(self.angles)`), and the stock AI's sight globals are set
+before the attack. Same M4 evaluation, the Ogre on its own maps:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps (e1m2/e2m2/e4m2), stock Ogre | 73.3% | 78.7% | 84.7% | 92.0% |
+| Training maps, shared model's Ogre | 69.3% | 82.0% | **87.3%** | 89.3% |
+| Held-out e3m2, stock Ogre | 66.0% | 72.0% | 86.0% | 86.0% |
+| Held-out e3m2, shared model's Ogre | 68.0% | 74.0% | **92.0%** | **92.0%** |
+
+The Ogre beats the stock Ogre at skill 2 on the training maps (the #35 bar),
+is ahead in 3 of 4 held-out cells and faster to first damage in 6 of 8. The
+existing classes do not regress against the damage-reward three-type model:
+the Dog is ahead of the stock Dog in all 8 cells again (74.0% vs 63.3% at
+training skill 2, held-out 98% vs 74% at skill 3) and level with the #51
+model; the Grunt is cell-for-cell level with it; the Enforcer is at 74.0% vs
+stock 69.0% at training skill 2 (the #50 bar, margin unchanged). In the
+creep probe the Dog now charges forward relentlessly (back:ahead 15:584,
+against the original models' 2.9-7.6x backward). No single id1 map stocks
+all four classes, so the client check drives them across two maps: e2m1's
+46 monsters (13 Grunts, 7 Dogs, 26 Enforcers, types 0-2) at 47 microseconds
+per decision and e1m2's 28 (16 Grunts, 12 Ogres, types 0 and 3) at 50.
+Released as `models-v4` with the four-entry class map (`monster_army 0`,
+`monster_dog 1`, `monster_enforcer 2`, `monster_ogre 3`).

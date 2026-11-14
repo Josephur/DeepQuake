@@ -236,6 +236,13 @@ static uint64_t multi_scenario(void)
  * The same machinery drives any stock class (#49): the state below belongs to
  * "the monster under test", whatever its class. */
 static int driven_mode; /* 0 idle, 1 forward, 2 turn, 3 attack the player */
+
+/* The end-state hashes of the clean and the 45-degree-error throw windows:
+ * the windows run on the same seed and the same inputs, so the hashes differ
+ * exactly when the aim error reaches the grenade's flight (#53). The grenade
+ * is not in dqsim_get_entities (its classname never reaches the sim's copy),
+ * so a hash is the honest comparison. */
+static uint64_t throw_hash_clean, throw_hash_error;
 static int driven_calls;
 static int driven_saw_player;
 static float driven_yaw;
@@ -669,6 +676,74 @@ static int ogre_attack(void)
     return 0;
 }
 
+/* Drive the throw for one window and return the window's end-state hash.
+ * The grenade is not in dqsim_get_entities (its classname never reaches the
+ * sim's entity copy), so the flight is compared through the hash. */
+static uint64_t ogre_throw_window(float aim_override, int *hits, float *damage)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m4", "monster_ogre", &index))
+        return 0;
+    CHECK(dqsim_set_handicap_override(0, aim_override) == DQSIM_OK,
+          "aim error override: %s", dqsim_last_error());
+    CHECK(place_player_visible(300.0f), "no free spot in the ogre's sight at 300 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float health = player.health;
+    *hits = 0;
+    *damage = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "throw steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the throw");
+        if (health - player.health > 0.5f) {
+            (*hits)++;
+            *damage = health - player.health;
+        }
+        health = player.health;
+    }
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return dqsim_state_hash();
+}
+
+/* The Ogre's ranged attack: the throw chain spawns a grenade that flies and
+ * explodes with radius damage (#53). The throw must reach the player from
+ * well outside bite range, and the QuakeC chain must gate the pace. */
+static int ogre_throw(void)
+{
+    /* A clean throw: skill 0's own aim error is 12 degrees, which at 300
+     * units can land a grenade wide of the player, so the exact throw is
+     * pinned with the override (the Enforcer's aim test does the same). */
+    int hits = 0;
+    float damage = 0;
+    throw_hash_clean = ogre_throw_window(0.0f, &hits, &damage);
+    printf("ogre: clean throw, %d grenade hits, %.0f damage\n", hits, damage);
+    CHECK(throw_hash_clean != 0, "the clean throw window failed");
+    CHECK(hits > 0, "the ogre never damaged the player at range: its throw chain does not "
+                    "spawn grenades");
+    CHECK(hits <= 8, "the ogre hit the player %d times in 8 s: the chain is not gating", hits);
+    return 0;
+}
+
+/* The aim error has to reach the grenade's launch too (#53): the thrown
+ * grenade is not visible in the sim's entity copy, so the two windows are
+ * compared by their end-state hashes - same seed, same inputs, the only
+ * difference is the bent flight, so equal hashes would mean the error never
+ * touched the grenade. */
+static int ogre_throw_aim_error(void)
+{
+    int hits = 0;
+    float damage = 0;
+    throw_hash_error = ogre_throw_window(45.0f, &hits, &damage);
+    printf("ogre: 45 degree error throw, %d grenade hits, %.0f damage\n", hits, damage);
+    CHECK(throw_hash_error != 0, "the error throw window failed");
+    CHECK(throw_hash_clean != throw_hash_error,
+          "the aim error did not change the grenade's flight");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -707,7 +782,8 @@ int main(int argc, char **argv)
     if (dog_drive() || dog_bite() || dog_range())
         return 1;
 
-    if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack())
+    if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack() ||
+        ogre_throw() || ogre_throw_aim_error())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

@@ -111,14 +111,19 @@ def test_export_shared_model_writes_the_class_map(tmp_path):
         None,
         {
             "total_steps": 5,
-            "monsters": ["monster_dog", "monster_army", "monster_enforcer"],
+            "monsters": [
+                "monster_dog",
+                "monster_army",
+                "monster_enforcer",
+                "monster_ogre",
+            ],
         },
     )
     out = tmp_path / "shared.onnx"
     spec = export.export_onnx(checkpoint, out, samples=16)
     assert spec["n_types"] == monster.N_MONSTER_TYPES
     assert (tmp_path / "shared.onnx.monsters").read_text() == (
-        "monster_army 0\nmonster_dog 1\nmonster_enforcer 2\n"
+        "monster_army 0\nmonster_dog 1\nmonster_enforcer 2\nmonster_ogre 3\n"
     )
     nvec_line = (tmp_path / "shared.onnx.nvec").read_text().splitlines()[0]
     assert [int(n) for n in nvec_line.split()] == list(monster_env.MONSTER_ACTION_NVEC)

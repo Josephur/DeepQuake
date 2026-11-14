@@ -223,24 +223,46 @@ frame pattern except `monster_oldone` and `monster_boss`, whose states are
 The attack entry is found by shape, since the classes disagree on it: `atk1`
 (the Grunt's `army_atk1`, the Enforcer's `enf_atk1`), `atta1` (the Dog's
 `dog_atta1`), `attack`, `attack1` (the Shalrath's `shal_attack1`), `melee`
-(the Ogre's `ogre_melee`) and `melee1`. The shot is found from what the
-attack chain calls, because the shot is not always named after the class
-either: the Grunt's is `army_fire`, the Enforcer's `enforcer_fire`, and a
-function whose name ends in `fire` or `shot` is one. Measured on the local
+(the Ogre's `ogre_melee`) and `melee1`. The shape probe is the fallback: the
+entries the hook actually runs are the spawn's own `th_melee` and
+`th_missile` fields, which the stock AI picks between by range — melee below
+120 units, the ranged entry beyond (#53). The ranged entry is the spawn's
+`th_missile` only when its chain reaches a shot: the Dog's `th_missile` is a
+one-shot pounce (`dog_leap1`), and one entry execution per decision cannot
+charge with it, so the Dog keeps the lunge the probe finds at every range.
+The shot is found from what the attack chain calls, because the shot is not
+always named after the class either: the Grunt's is `army_fire`, the
+Enforcer's `enforcer_fire`, and a function whose name contains `fire` or
+`shot` is one (the Ogre's grenade launch is `OgreFireGrenade`, which contains
+`Fire` without ending in it; the engine's own `SUB_CheckRefire` is excluded).
+The chains are walked from the attack entries, so the throw frames the name
+scan could never reach (`ogre_nail4`) are found too. Measured on the local
 game data, before and after: the Enforcer went from 0 hook calls in 72
 ticks (the stock AI kept playing it) to 67, and from no damage under the
 policy to 45; the Ogre went from 149 calls and no damage to 65 calls and 30
-damage. The Grunt, Dog, Knight, Demon and Zombie are unchanged.
+damage. The Grunt, Dog, Knight, Demon and Zombie are unchanged. Under #53
+the Ogre's grenades reach the player at 300 units (a clean throw deals 26),
+which the single melee entry could never do.
 
-**The aim error covers every shot of an attack (#49).** The error is rolled
-once, when the policy asks for the attack, and applied where the shot is
-aimed — the enemy's origin, from the firing frame. A class whose chain
+**The aim error covers every shot of an attack (#49, #53).** The error is
+rolled once, when the policy asks for the attack, and applied where the shot
+is aimed — the enemy's origin, from the firing frame. A class whose chain
 fires more than once (the Enforcer fires at `enf_atk6` and again at
 `enf_atk10`) would otherwise keep an exact second shot, and its difficulty
 would not scale with `skill`. The error therefore stays pending until the
-monster decides again, and every frame that fires is offset. Measured: with
-the aim error overridden to 45 degrees the Enforcer's shots all miss (0
-damage in 3 s), and with no error the same shot hits.
+monster decides again, and every frame that fires is offset. Shots that aim
+from the monster's own facing rather than from the enemy's origin — the
+Ogre's grenade throws with `makevectors(self.angles)` and only takes its
+lead from the enemy — cannot be bent by displacing the enemy, so the
+monster's facing is rolled by the same error too, and restored after the
+frame (#53). The stock AI's sight globals (`enemy_range`, `enemy_vis`,
+`enemy_infront`) are set before the attack runs, since the chains read them
+(the grenade's lead comes from `enemy_range`) and the hook replaced the
+think that would have set them. Measured: with the aim error overridden to
+45 degrees the Enforcer's shots all miss (0 damage in 3 s), and with no
+error the same shot hits; the Ogre's throw window hashes differ with and
+without the same override, which is the flight-path difference the sim's
+entity copy cannot show.
 
 **A whole level at once (#46, M6).** The hook keeps a fixed table of 64
 nominations, each with its own callback, user pointer, QuakeC names, animation
@@ -401,15 +423,17 @@ inference call per tick. If a type later proves to be held back by sharing,
 it can be split off and fine-tuned on its own; that direction is easy, the
 reverse is not.
 
-**Implemented (#48, #50)** for the Grunt, the Dog and the Enforcer, with
+**Implemented (#48, #50, #53)** for the Grunt, the Dog, the Enforcer and
+the Ogre, with
 three simplifications of the design above:
 
 - **The type is a one-hot, appended to the observation**
   (`deepquake.monster.MONSTER_TYPES = (monster_army, monster_dog,
-  monster_enforcer)`, so `MONSTER_OBS_DIM` is 119 + 3 = 122). The recurrent
+  monster_enforcer, monster_ogre)`, so `MONSTER_OBS_DIM` is 119 + 4 = 123).
+  The recurrent
   cell's input weights play the role of the embedding, and the model keeps a
   single observation input, which is what the client passes.
-- **A policy head per type, one shared value head.** The three types have
+- **A policy head per type, one shared value head.** The types have
   the same action layout today, so the heads differ only in weights.
   The head is selected by multiplying each head's logits by the
   observation's one-hot and summing, not by an index gather, so the ONNX
@@ -426,7 +450,7 @@ last source head when the source had fewer types — and its value head, so
 the shared model starts out playing exactly like the model it came from (a
 unit test checks actions, log-probabilities, value and hidden state are
 identical for the carried-over one-hots). Training then samples the body per
-episode, so all three types train together. The exported model ships a class
+episode, so all the types train together. The exported model ships a class
 map, `<model>.onnx.monsters` (`classname type_index` per line), which tells
 the client which classes it drives; a 119-wide v1 model without one still
 loads as the Grunt policy.

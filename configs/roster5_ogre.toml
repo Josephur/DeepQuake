@@ -1,0 +1,61 @@
+# The four-type roster run (#53): one shared policy for the Grunt, the Dog,
+# the Enforcer and the Ogre, warm started from the damage-reward three-type
+# model. The trunk and the recurrent core are shared; the monster type comes
+# in as a one-hot appended to the observation (deepquake.monster.MONSTER_TYPES),
+# and each type has its own policy head, so one ONNX model can drive a mixed
+# level.
+#
+# Reward: "damage" (the #51 fix) - the dense (dealt - taken)/100 per-step term
+# is what keeps the Dog committing to closing; reverting to the sparse
+# terminal reward would undo the melee fix.
+#
+# Maps: the union of the two class pools. e1m1/e2m1/e4m1 stock the Grunt, the
+# Dog and the Enforcer (every previous roster run's training maps); e1m2/e2m2/
+# e4m2 stock the Ogre (12/14/13 of them, per the #53 groundwork) - no Ogre
+# map overlaps the previous four, so the Ogre's training episodes come only
+# from the new maps. The Dog and Enforcer must keep training too: on
+# Ogre-only maps their bodies would get zero episodes and the shared trunk
+# would drift away from them. Held out: e3m1 (the existing classes' held-out
+# map, unchanged since #48) and e3m2 (the Ogre's held-out map, 16 Ogres, the
+# m2 family mirroring the m1 family's e3-held-out rule).
+#   uv run python -m deepquake.train_monster configs/roster5_ogre.toml
+name = "roster5_ogre"
+monsters = ["monster_army", "monster_dog", "monster_enforcer", "monster_ogre"]
+# The three-type damage-reward checkpoint: its GRU, its policy heads and its
+# value head are copied, the new type column is zeroed, so the shared network
+# starts out playing exactly like the released model. The Ogre's head starts
+# from the last source head (the Enforcer's), which init_from does by index.
+init_from = "runs/roster4_damage/checkpoint.pt"
+maps = ["e1m1", "e2m1", "e4m1", "e1m2", "e2m2", "e4m2"]
+held_out = ["e3m1", "e3m2"]
+envs = 6
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "damage"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32

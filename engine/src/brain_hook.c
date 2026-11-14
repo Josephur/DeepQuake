@@ -41,6 +41,14 @@ typedef struct dq_hook_slot {
     func_t fire_thinks[DQ_MAX_FIRE_THINKS];
     int fire_count;
     func_t attack_think; /* the function that starts an attack, 0 = none */
+    /* The two attack entries the stock AI picks between (#53): th_melee when
+     * the enemy is in melee range (QuakeC's RANGE_MELEE is 64), the ranged
+     * entry otherwise. The ranged entry is the spawn's th_missile when its
+     * chain fires a projectile (the Ogre's grenade throw, unreachable from a
+     * name-shaped probe), else the shape probe's entry - the Dog's th_missile
+     * is a pounce, and one entry execution per decision cannot charge with
+     * it. 0 = the class sets none. */
+    func_t melee_think, missile_think;
     float stand_frame, run_frame;
     int run_frames;
     unsigned anim_tick;
@@ -54,6 +62,7 @@ static dq_hook_slot hook_slots[DQ_BRAIN_MAX_MONSTERS];
  * frames, the attack entry and the shot. Defined below, next to the
  * lookups it uses. */
 static int resolve_prefix(dq_hook_slot *slot, const char *prefix);
+static void find_enemy_globals(void);
 
 /* The class prefix of a decision think's name ("enf_stand1" -> "enf_"). */
 static int decision_think_prefix(const char *name, char *out, size_t size);
@@ -287,6 +296,8 @@ int dq_brain_set_handicap_states(const dq_handicap_state *in, size_t count)
 
 void dq_brain_hook_on_level_start(void)
 {
+    if (progs_is_stock)
+        find_enemy_globals();
     if (!stock_identity_valid)
         return;
     for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
@@ -330,42 +341,137 @@ static func_t find_function(const char *name)
  * The shot is not always named after the class: the Grunt's is "army_fire"
  * and the Enforcer's "enforcer_fire", while the Enforcer's prefix is "enf_".
  * So the shot is found by what the attack chain calls, not by its name: a
- * function whose name ends in "fire" or "shot" fires one. "SUB_CheckRefire"
- * does not end in either, and is not a shot. */
+ * function whose name contains "fire" or "shot" fires one. The Ogre's
+ * grenade launch is "OgreFireGrenade", which contains "Fire" without ending
+ * in it (#53); "SUB_CheckRefire" is not a shot, and the engine's own helpers
+ * that merely share the syllable (the doors' "door_fire") are not reached
+ * from a monster's attack chain. */
 static int is_shot_function(const char *name)
 {
-    size_t length = strlen(name);
-    if (length >= 4 && strcmp(name + length - 4, "fire") == 0)
-        return 1;
-    if (length >= 4 && strcmp(name + length - 4, "shot") == 0)
-        return 1;
+    if (strncmp(name, "SUB_", 4) == 0)
+        return 0;
+    for (const char *c = name; *c; c++) {
+        if ((c[0] == 'f' || c[0] == 'F') && strncasecmp(c, "fire", 4) == 0)
+            return 1;
+        if ((c[0] == 's' || c[0] == 'S') && strncasecmp(c, "shot", 4) == 0)
+            return 1;
+    }
     return 0;
 }
 
-static int find_fire_thinks(const char *prefix, func_t *out, int max)
+/* The stock AI sets these three globals from the monster's own sight before
+ * any attack (ai_stand/ai_run's FindTargetDistance); the attack chains read
+ * them - the Ogre's grenade throw picks its lead from "enemy_range" and
+ * gates on "enemy_vis" (#53). The hook replaces the think that would have
+ * set them, so it sets the same three by the same rule: RANGE_MELEE 1 below
+ * 120 units, RANGE_NEAR 2 below 500, RANGE_MID 3 below 1000, RANGE_FAR 4.
+ * Offsets into pr_globals, found once per progs load; 0 = the global does
+ * not exist in this progs. */
+static int range_global_ofs, vis_global_ofs, infront_global_ofs;
+static int enemy_globals_found;
+
+static void find_enemy_globals(void)
 {
-    char name[40];
+    ddef_t *defs = (ddef_t *)((byte *)progs + progs->ofs_globaldefs);
+    for (int i = 0; i < progs->numglobaldefs; i++) {
+        const char *name = PR_GetString(defs[i].s_name);
+        if (strcmp(name, "enemy_range") == 0)
+            range_global_ofs = defs[i].ofs;
+        else if (strcmp(name, "enemy_vis") == 0)
+            vis_global_ofs = defs[i].ofs;
+        else if (strcmp(name, "enemy_infront") == 0)
+            infront_global_ofs = defs[i].ofs;
+    }
+    enemy_globals_found = 1;
+}
+
+static int chain_has_shot_call(func_t fnum)
+{
+    dfunction_t *function = &pr_functions[fnum];
+    for (int s = 0; s < 512; s++) {
+        dstatement_t *statement = &pr_statements[function->first_statement + s];
+        if (statement->op == OP_DONE || statement->op == OP_RETURN)
+            break;
+        if (statement->op >= OP_CALL0 && statement->op <= OP_CALL8) {
+            func_t called;
+            memcpy(&called, &pr_globals[statement->a], sizeof(called));
+            if (called > 0 && called < progs->numfunctions &&
+                is_shot_function(PR_GetString(pr_functions[called].s_name)))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* The state function this one chains to: an attack chain is a run of frame
+ * functions, each ending in OP_STATE (frame, next think). */
+static func_t chain_next(func_t fnum)
+{
+    dstatement_t *statement = &pr_statements[pr_functions[fnum].first_statement];
+    for (int s = 0; s < 512; s++, statement++) {
+        if (statement->op == OP_DONE || statement->op == OP_RETURN)
+            return 0;
+        if (statement->op == OP_STATE) {
+            func_t next;
+            memcpy(&next, &pr_globals[statement->b], sizeof(next));
+            return next > 0 && next < progs->numfunctions ? next : 0;
+        }
+    }
+    return 0;
+}
+
+/* Does this attack chain reach a shot anywhere? Walked with a visited set:
+ * the chains end back in the run cycle, which loops. */
+static int chain_reaches_shot(func_t entry)
+{
+    func_t visited[96];
+    int visited_count = 0;
+    for (func_t f = entry; f; f = chain_next(f)) {
+        int seen = 0;
+        for (int i = 0; i < visited_count; i++)
+            if (visited[i] == f) {
+                seen = 1;
+                break;
+            }
+        if (seen)
+            return 0;
+        if (visited_count < (int)(sizeof(visited) / sizeof(*visited)))
+            visited[visited_count++] = f;
+        if (chain_has_shot_call(f))
+            return 1;
+    }
+    return 0;
+}
+
+/* The attack chain's own frames that fire the shot: walk the state chain
+ * from each attack entry - the spawn's th_melee and th_missile, else the
+ * shape probe - and record every frame that calls a shot function. The
+ * Enforcer's chain reaches "enforcer_fire" twice (atk6 and atk10) and the
+ * Ogre's throw chain calls "OgreFireGrenade" from its "ogre_nail" frames,
+ * which no "<prefix>atk<n>" name scan could find (#53). */
+static int find_fire_thinks(const dq_hook_slot *slot, func_t *out, int max)
+{
+    const func_t entries[3] = {slot->melee_think, slot->missile_think, slot->attack_think};
+    func_t visited[96];
+    int visited_count = 0;
     int count = 0;
 
-    for (int n = 1; n <= 24 && count < max; n++) {
-        q_snprintf(name, sizeof(name), "%satk%d", prefix, n);
-        func_t candidate = find_function(name);
-        if (!candidate)
+    for (int e = 0; e < 3; e++) {
+        if (!entries[e])
             continue;
-        dfunction_t *function = &pr_functions[candidate];
-        for (int s = 0; s < 512; s++) {
-            dstatement_t *statement = &pr_statements[function->first_statement + s];
-            if (statement->op == OP_DONE || statement->op == OP_RETURN)
-                break;
-            if (statement->op >= OP_CALL0 && statement->op <= OP_CALL8) {
-                func_t called;
-                memcpy(&called, &pr_globals[statement->a], sizeof(called));
-                if (called > 0 && called < progs->numfunctions &&
-                    is_shot_function(PR_GetString(pr_functions[called].s_name))) {
-                    out[count++] = candidate;
+        for (func_t f = entries[e]; f; f = chain_next(f)) {
+            int seen = 0;
+            for (int i = 0; i < visited_count; i++)
+                if (visited[i] == f) {
+                    seen = 1;
                     break;
                 }
-            }
+            if (seen)
+                break;
+            if (visited_count < (int)(sizeof(visited) / sizeof(*visited)))
+                visited[visited_count++] = f;
+            if (count < max && chain_has_shot_call(f))
+                out[count++] = f;
         }
     }
     return count;
@@ -519,8 +625,27 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
                 break;
             }
         }
+        /* The stock AI runs the spawn's own th_melee when the enemy is in
+         * melee range (QuakeC's RANGE_MELEE is 64) and th_missile otherwise;
+         * a class without one entry falls back to the other, and a class
+         * with neither uses the shape probe (#53). For the Grunt, the Dog
+         * and the Enforcer this picks the same function the shape probe
+         * always did: their spawns set exactly one entry. */
+        func_t attack = 0;
+        if (enemy) {
+            float dx = enemy->v.origin[0] - ent->v.origin[0];
+            float dy = enemy->v.origin[1] - ent->v.origin[1];
+            float distance = sqrtf(dx * dx + dy * dy);
+            if (distance <= 64.0f && slot->melee_think)
+                attack = slot->melee_think;
+            else if (slot->missile_think)
+                attack = slot->missile_think;
+            else if (slot->melee_think)
+                attack = slot->melee_think;
+            else
+                attack = slot->attack_think;
+        }
         eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
-        func_t attack = enemy ? slot->attack_think : 0;
         if (attack && (!cooldown || sv.time >= cooldown->_float)) {
             int reaction_ticks;
             float aim_error_deg;
@@ -531,6 +656,22 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
             pr_global_struct->self = EDICT_TO_PROG(ent);
             pr_global_struct->other = EDICT_TO_PROG(enemy);
             pr_global_struct->time = sv.time;
+            /* The think the stock AI would have run set the sight globals
+             * first; the chains read them (see find_enemy_globals). */
+            if (enemy_globals_found) {
+                float dx = enemy->v.origin[0] - ent->v.origin[0];
+                float dy = enemy->v.origin[1] - ent->v.origin[1];
+                float distance = sqrtf(dx * dx + dy * dy);
+                if (range_global_ofs)
+                    pr_globals[range_global_ofs] =
+                        distance < 120.0f ? 1.0f
+                                          : distance < 500.0f ? 2.0f
+                                                              : distance < 1000.0f ? 3.0f : 4.0f;
+                if (vis_global_ofs)
+                    pr_globals[vis_global_ofs] = 1.0f;
+                if (infront_global_ofs)
+                    pr_globals[infront_global_ofs] = 1.0f;
+            }
             PR_ExecuteProgram(attack);
             attacked = 1;
         }
@@ -615,7 +756,16 @@ void dqsim_hook_execute_program(func_t fnum)
                     enemy->v.origin[2] += distance * tanf(slot->handicap.aim_pitch_deg *
                                                           3.14159265f / 180.0f);
                 }
+                /* Shots that aim from the monster's own facing rather than
+                 * from the enemy's origin - the Ogre's grenade throws with
+                 * makevectors(self.angles) and only takes its lead from the
+                 * enemy - cannot be bent by displacing the enemy, so the
+                 * monster's facing is rolled by the same error too and
+                 * restored after the frame (#53). */
+                float saved_yaw = ent->v.angles[YAW];
+                ent->v.angles[YAW] += slot->handicap.aim_yaw_deg;
                 PR_ExecuteProgram(fnum);
+                ent->v.angles[YAW] = saved_yaw;
                 VectorCopy(saved, enemy->v.origin);
                 return;
             }
@@ -659,17 +809,15 @@ void dqsim_hook_execute_program(func_t fnum)
     PR_ExecuteProgram(fnum);
 }
 
-/* The function that starts this class's attack: the first frame of the
- * attack animation. It is the function the spawn built-in assigns to the
- * monster's "th_melee" field, which the stock AI runs when it decides to
- * attack - the Grunt's "army_atk1", which chains to "army_fire", and the
- * Dog's "dog_atta1", a lunge whose chain bites from "dog_bite" (#47).
- * "<class>CheckAttack" is *not* that function: it is the AI's range
- * classifier, it reads the global "enemy_range" that only the stock AI
- * sets, and it starts nothing. A melee animation is under
- * "<prefix>atta1...", so try the known shapes in order. The Ogre's entry is
- * "ogre_melee" and the Shalrath's "shal_attack1", so those shapes are here
- * too (#49). */
+/* The fallback attack entry, by name shape: the entries the hook actually
+ * runs come from the spawn's own th_melee/th_missile fields (#53), and this
+ * probe covers a class whose spawn sets neither - the Grunt's "army_atk1",
+ * which chains to "army_fire", and the Dog's "dog_atta1", a lunge whose
+ * chain bites from "dog_bite" (#47). "<class>CheckAttack" is *not* an attack
+ * entry: it is the AI's range classifier, it reads the global "enemy_range"
+ * that only the stock AI sets, and it starts nothing. The Ogre's "ogre_melee"
+ * and the Shalrath's "shal_attack1" are the shapes that forced this list
+ * (#49). */
 static func_t find_attack_think(const char *prefix)
 {
     static const char *const names[] = {"atk1", "atta1", "attack", "attack1", "melee", "melee1"};
@@ -746,7 +894,6 @@ static int resolve_prefix(dq_hook_slot *slot, const char *prefix)
     slot->run_frame = run_frame;
     slot->run_frames = run_frames > 0 ? run_frames : 1;
     slot->attack_think = find_attack_think(slot->prefix);
-    slot->fire_count = find_fire_thinks(slot->prefix, slot->fire_thinks, DQ_MAX_FIRE_THINKS);
     return 1;
 }
 
@@ -789,6 +936,26 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
     char class_prefix[32];
     q_snprintf(class_prefix, sizeof(class_prefix), "%s_", classname + 8);
     resolve_prefix(slot, class_prefix);
+    /* The spawn's own attack entries: the stock AI runs th_melee in melee
+     * range and th_missile otherwise. The Ogre's throw lives only in
+     * th_missile, so a name-shaped probe finds only its melee entry (#53).
+     * The fields are QuakeC-level, beyond entvars_t, hence the field lookup. */
+    eval_t *melee_field = GetEdictFieldValue(ent, "th_melee");
+    eval_t *missile_field = GetEdictFieldValue(ent, "th_missile");
+    slot->melee_think = melee_field ? melee_field->function : 0;
+    slot->missile_think = missile_field ? missile_field->function : 0;
+    /* The ranged entry is the spawn's th_missile only when its chain actually
+     * fires a projectile: the Dog's th_missile is a one-shot pounce, and the
+     * hook runs an entry once per decision, so a pounce cannot close distance
+     * the way the lunge the shape probe finds does (#53). */
+    func_t probe = slot->attack_think;
+    func_t melee = slot->melee_think;
+    func_t missile = slot->missile_think;
+    slot->melee_think = melee ? melee : probe;
+    slot->missile_think = missile && chain_reaches_shot(missile) ? missile : probe;
+    if (!melee && !missile)
+        slot->melee_think = probe; /* no spawn entries: the probe's guess everywhere */
+    slot->fire_count = find_fire_thinks(slot, slot->fire_thinks, DQ_MAX_FIRE_THINKS);
     return NULL;
 }
 
