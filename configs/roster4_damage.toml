@@ -1,0 +1,54 @@
+# The dense-reward run (#51): the same three-type roster as
+# configs/roster3_pool.toml, with reward = "damage" instead of "sparse".
+#
+# Why: the trained Dog creeps at the player and never commits to closing -
+# back commands dominate ahead commands in both the two-type and the
+# three-type models (measured on #51: back:ahead 2.9x and 7.6x), the attack
+# bit does all the closing and the explicit movement cancels it between
+# lunges. Under the sparse terminal reward there is no gradient that prefers
+# committing: oscillating in the open costs nothing until the terminal step.
+# The damage reward pays (dealt - taken)/100 per step, so oscillating under
+# fire is strictly negative, closing and biting is positive, and the
+# terminal +/-1 is unchanged.
+#
+# Everything else is unchanged from configs/roster3_pool.toml (warm start
+# from the three-type checkpoint, same maps and held-out map, same
+# opponents, skills, styles and PPO settings), so the difference measured
+# is the reward, not a different task.
+#   uv run python -m deepquake.train_monster configs/roster4_damage.toml
+name = "roster4_damage"
+monsters = ["monster_army", "monster_dog", "monster_enforcer"]
+init_from = "runs/roster3_pool/checkpoint.pt"
+maps = ["e1m1", "e2m1", "e4m1"]
+held_out = ["e3m1"]
+envs = 6
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "damage"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
