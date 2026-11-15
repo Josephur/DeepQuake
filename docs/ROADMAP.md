@@ -468,3 +468,39 @@ at 51 microseconds per decision and e2m5's 42 (24 Ogres type 3, 18 Hell
 Knights type 4) at 54. Released as `models-v5` with the five-entry class
 map (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`,
 `monster_ogre 3`, `monster_hell_knight 4`).
+
+Shared model, sixth type (2026-11-14, #56: `configs/roster8_shalrath.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, ogre, hell knight, shalrath, the
+observation 119 + 6 = 125 wide, warm-started from the five-type roster model
+with the Shalrath's head taken from the Enforcer's, the #55 mechanism). Two
+hook generalizations the Shalrath needed: the decision-think pattern accepts
+the digitless single-state stand (its stand think is `shal_stand`, so a
+standing Shalrath stayed stock-controlled until the pattern allowed it - the
+ctest shows 144 policy decisions in 2 s while standing), and a shot function
+is one whose name contains fire, shot or missile (the spike launch is
+`ShalMissile`). Trained on the union pool plus e2m6/e4m6/e4m7, e4m8 held
+out; reward stays `damage`. Same M4 evaluation, the Shalrath on its own maps:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps (e2m6/e4m6/e4m7), stock Shalrath | 34.0% | 26.7% | 28.0% | 28.0% |
+| Training maps, shared model's Shalrath | 38.7% | 29.3% | **32.0%** | **32.7%** |
+
+The Shalrath beats the stock Shalrath in every training cell (the #35 bar at
+skill 2 by 4.0 points; the stock Shalrath's own win rates are low - its
+homong spikes are strong but its placement is sparse and the trained player
+opponent punishes it). The held-out e4m8 cells at skill 0 are void (0% both
+sides with no damage timings: skill 0 stocks too few Shalraths there for
+placement to succeed; not a result), and at skills 1-3 the held-out picture
+is level to slightly behind (56/76/82 stock vs 56/76/82/82 trained at
+skills 1-3). The other five classes do not regress beyond the eval's own
+seed variance (the #55 measurement): the Dog is ahead of the stock Dog in
+all 8 cells again (76.0% vs 63.3% at training skill 2), the Ogre beats stock
+at skill 2 (86.7% vs 84.7%), the Hell Knight at 77.3% vs 74.0%, the Enforcer
+at 66.0% vs 69.0% (-3.0, 0.4 standard errors at 100 tasks) and the Grunt at
+64.7% vs 62.7%. In the client, the six classes are driven across three maps:
+e2m1's 46 monsters (types 0-2) at 52 microseconds per decision, e1m2's 28
+(types 0 and 3) at 56, and e4m7's 22 (18 Hell Knights type 4, 10 Shalraths
+type 5) at 55. Released as `models-v6` with the six-entry class map
+(`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`, `monster_ogre 3`,
+`monster_hell_knight 4`, `monster_shalrath 5`).

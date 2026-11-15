@@ -348,14 +348,15 @@ static func_t find_function(const char *name)
  * from a monster's attack chain. */
 static int is_shot_function(const char *name)
 {
+    static const char *const shots[] = {"fire", "shot", "missile"};
     if (strncmp(name, "SUB_", 4) == 0)
         return 0;
-    for (const char *c = name; *c; c++) {
-        if ((c[0] == 'f' || c[0] == 'F') && strncasecmp(c, "fire", 4) == 0)
-            return 1;
-        if ((c[0] == 's' || c[0] == 'S') && strncasecmp(c, "shot", 4) == 0)
-            return 1;
-    }
+    for (const char *c = name; *c; c++)
+        for (size_t i = 0; i < sizeof(shots) / sizeof(*shots); i++) {
+            size_t length = strlen(shots[i]);
+            if (strncasecmp(c, shots[i], length) == 0)
+                return 1;
+        }
     return 0;
 }
 
@@ -840,6 +841,11 @@ static func_t find_attack_think(const char *prefix)
  * underscore, and returns 1 when the name is such a think. */
 static int decision_think_prefix(const char *name, char *out, size_t size)
 {
+    /* The Shambler-like single-state stand has no frame digits (#56): the
+     * Shalrath's stand think is "shal_stand", while its walk and run states
+     * are shal_walk1..12 and shal_run1..12. Digits are therefore optional;
+     * the underscore before the kind is not, so a bare "run" still cannot
+     * pretend to be a class's state. */
     static const char *const kinds[] = {"stand", "walk", "run"};
     const char *underscore = strrchr(name, '_');
 
@@ -850,8 +856,6 @@ static int decision_think_prefix(const char *name, char *out, size_t size)
         if (strncmp(underscore + 1, kinds[i], length) != 0)
             continue;
         const char *digits = underscore + 1 + length;
-        if (!*digits)
-            return 0;
         for (const char *digit = digits; *digit; digit++)
             if (*digit < '0' || *digit > '9')
                 return 0;
@@ -878,6 +882,11 @@ static int resolve_prefix(dq_hook_slot *slot, const char *prefix)
 
     q_snprintf(name, sizeof(name), "%sstand1", prefix);
     stand_frame = state_frame(find_function(name));
+    if (stand_frame < 0.0f) {
+        /* The digitless single-state stand: the Shalrath's "shal_stand" (#56). */
+        q_snprintf(name, sizeof(name), "%sstand", prefix);
+        stand_frame = state_frame(find_function(name));
+    }
     q_snprintf(name, sizeof(name), "%srun1", prefix);
     run_frame = state_frame(find_function(name));
     for (int i = 1; i <= 24; i++) {

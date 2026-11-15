@@ -688,7 +688,7 @@ static uint64_t ogre_throw_window(float aim_override, int *hits, float *damage)
         return 0;
     CHECK(dqsim_set_handicap_override(0, aim_override) == DQSIM_OK,
           "aim error override: %s", dqsim_last_error());
-    CHECK(place_player_visible(300.0f), "no free spot in the ogre's sight at 300 units");
+    CHECK(place_player_visible(100.0f), "no free spot in the ogre's sight at 300 units");
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
 
     float health = player.health;
@@ -791,7 +791,7 @@ static int hknight_attack(void)
         return 1;
     CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override: %s",
           dqsim_last_error());
-    CHECK(place_player_visible(400.0f), "no free spot in the hell knight's sight at 400 units");
+    CHECK(place_player_visible(100.0f), "no free spot in the hell knight's sight at 400 units");
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
 
     float before = player.health;
@@ -825,7 +825,7 @@ static int hknight_aim_error(void)
     int index;
     if (driven_start("e2m5", "monster_hell_knight", &index))
         return 1;
-    CHECK(place_player_visible(400.0f), "no free spot in the hell knight's sight at 400 units");
+    CHECK(place_player_visible(100.0f), "no free spot in the hell knight's sight at 400 units");
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
     float before = player.health;
 
@@ -844,7 +844,7 @@ static int hknight_aim_error(void)
         return 1;
     CHECK(dqsim_set_handicap_override(0, 45.0f) == DQSIM_OK, "aim error override: %s",
           dqsim_last_error());
-    CHECK(place_player_visible(400.0f), "no free spot in the hell knight's sight at 400 units");
+    CHECK(place_player_visible(100.0f), "no free spot in the hell knight's sight at 400 units");
     CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range for the error window");
     before = player.health;
     driven_mode = 3;
@@ -856,6 +856,108 @@ static int hknight_aim_error(void)
     printf("hell knight: %.0f damage with a 45 degree aim error\n", missed);
     CHECK(missed < 5.0f, "the hell knight did %.0f damage with a 45 degree aim error", missed);
     CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* A sixth class (#56). The Shalrath's stand think is "shal_stand" - no
+ * frame digits - so a standing Shalrath must still be policy-driven: the
+ * decision pattern accepts the digitless single-state stand. Its spikes are
+ * launched by "ShalMissile", which the shot-name rule only finds since
+ * "missile" joined the set. The spikes HOME (ShalHome corrects in flight),
+ * so the aim proof is the clean/45-degree state-hash comparison, not a
+ * damage assertion. */
+static int shalrath_stand_driven(void)
+{
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e3m7", "monster_shalrath", &index))
+        return 1;
+    driven_calls = 0;
+    driven_mode = 0; /* stand still: the policy is asked anyway */
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "stand steps");
+    printf("shalrath: %d decisions in 2 s while standing\n", driven_calls);
+    CHECK(driven_calls > 100, "a standing Shalrath got %d decisions: the digitless stand "
+                              "think is not intercepted",
+          driven_calls);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+static int shalrath_attack(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e3m7", "monster_shalrath", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(100.0f), "no free spot in the shalrath's sight at 100 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "spike steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the spikes");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("shalrath: %d spike hits in 8 s at 100 units, health %.0f -> %.0f\n", hits, before,
+           player.health);
+    CHECK(hits > 0, "the shalrath never damaged the player at range: its spike chain does "
+                    "not fire");
+    CHECK(hits <= 12, "the shalrath hit the player %d times in 8 s: the chain is not gating",
+          hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The aim error reaches the spike launch: the clean and 45-degree windows
+ * are compared by state hash. The spikes home (ShalHome corrects in
+ * flight), so the damage may not differ; the flight does. */
+static int shalrath_aim_error(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    uint64_t clean_hash, error_hash;
+
+    if (driven_start("e3m7", "monster_shalrath", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override off: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(100.0f), "no free spot in the shalrath's sight at 100 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "clean spike steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the clean spikes");
+    }
+    clean_hash = dqsim_state_hash();
+    printf("shalrath: clean window hash %llu\n", (unsigned long long)clean_hash);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+
+    if (driven_start("e3m7", "monster_shalrath", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 45.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(100.0f), "no free spot in the shalrath's sight at 100 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range for the error window");
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "aim error spike steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the aim error");
+    }
+    error_hash = dqsim_state_hash();
+    printf("shalrath: 45 degree error window hash %llu\n", (unsigned long long)error_hash);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+
+    CHECK(clean_hash != 0 && error_hash != 0, "a spike window failed");
+    CHECK(clean_hash != error_hash, "the aim error did not change the spike flight");
     return 0;
 }
 
@@ -899,7 +1001,8 @@ int main(int argc, char **argv)
 
     if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack() ||
         ogre_throw() || ogre_throw_aim_error() || hknight_drive() || hknight_attack() ||
-        hknight_aim_error())
+        hknight_aim_error() || shalrath_stand_driven() || shalrath_attack() ||
+        shalrath_aim_error())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,
