@@ -961,6 +961,77 @@ static int shalrath_aim_error(void)
     return 0;
 }
 
+/* A seventh class (#57). The Knight's prefix is "knight_", all states carry
+ * frame digits, and the progs name no fireball launch helper - the spawn may
+ * be inline in the chain, which the shot-name rule cannot match. The ctests
+ * measure what actually happens: movement, damage at range, and the aim hash
+ * (clean vs 45 degrees - equal hashes would mean the fire-think detection
+ * needs extending). */
+static int knight_drive(void)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m4", "monster_knight", &index))
+        return 1;
+
+    float start[3];
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1;
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "knight forward");
+    int count = dqsim_get_entities(entities, 2048);
+    int found = 0;
+    float moved = 0;
+    for (int i = 0; i < count; i++)
+        if (entities[i].index == index) {
+            found = 1;
+            for (int k = 0; k < 2; k++) {
+                float delta = entities[i].origin[k] - start[k];
+                moved += delta * delta;
+            }
+        }
+    CHECK(found, "the knight vanished");
+    CHECK(sqrtf(moved) > 20.0f, "the knight moved %.1f units in 2 s", sqrtf(moved));
+    printf("knight: moved %.0f units in 2 s\n", sqrtf(moved));
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The Knight is a pure melee monster in this progs: the spawn's entries both
+ * point at the sword chain (knight_atk1..10, ai_melee), the knight_bow chain
+ * is vestigial (ai_turn only) and no knight function spawns anything. The
+ * damage has to land at sword range, and the chain has to gate. */
+static int knight_attack(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m4", "monster_knight", &index))
+        return 1;
+    CHECK(place_player_visible(50.0f), "no free spot in the knight's sight at 50 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "attack steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the attack");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("knight: %d sword hits in 8 s at 50 units, health %.0f -> %.0f\n", hits, before,
+           player.health);
+    CHECK(hits > 0, "the knight never damaged the player: its sword chain does not reach "
+                    "ai_melee");
+    CHECK(hits <= 24, "the knight hit the player %d times in 8 s: the chain is not gating",
+          hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1002,7 +1073,7 @@ int main(int argc, char **argv)
     if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack() ||
         ogre_throw() || ogre_throw_aim_error() || hknight_drive() || hknight_attack() ||
         hknight_aim_error() || shalrath_stand_driven() || shalrath_attack() ||
-        shalrath_aim_error())
+        shalrath_aim_error() || knight_drive() || knight_attack())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

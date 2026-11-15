@@ -504,3 +504,41 @@ e2m1's 46 monsters (types 0-2) at 52 microseconds per decision, e1m2's 28
 type 5) at 55. Released as `models-v6` with the six-entry class map
 (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`, `monster_ogre 3`,
 `monster_hell_knight 4`, `monster_shalrath 5`).
+
+Shared model, seventh type (2026-11-15, #57: `configs/roster9_knight.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, ogre, hell knight, shalrath, knight,
+the observation 119 + 7 = 126 wide, warm-started from the six-type roster
+model with the Knight's head taken from the **Dog's** — a melee closer, the
+closest mechanical shape). The increment measured what the Knight is in this
+progs first: a **pure melee monster** — the spawn's entries both point at the
+sword chain (knight_atk1..10, ai_melee), the knight_bow chain is vestigial
+(ai_turn only) and no knight function spawns anything, so the stock-lore
+fireball does not exist in this engine and the ctests pin the sword instead
+(22 hits in 8 s at 50 units, chain gated). Trained on the union pool plus
+e1m4/e4m3/e4m4, e1m5 held out; reward stays `damage`. Same M4 evaluation,
+the Knight on its own maps:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps (e1m4/e4m3/e4m4), stock Knight | 70.7% | 78.7% | 77.3% | 88.0% |
+| Training maps, shared model's Knight | 72.7% | 81.3% | **83.3%** | **89.3%** |
+| Held-out e1m5, stock Knight | 58.0% | 84.0% | 80.0% | 86.0% |
+| Held-out e1m5, shared model's Knight | 64.0% | **86.0%** | **90.0%** | 86.0% |
+
+The Knight beats the stock Knight in every training cell (the #35 bar at
+skill 2 by 6.0 points) and in 3 of 4 held-out cells. The other six classes
+do not regress beyond the eval's own variance (the #55/#56 seed-swing
+reference): the Dog is ahead of the stock Dog in all 8 cells (71.3% vs
+65.3% at training skill 3), the Ogre at 82.0% vs 84.7% at skill 2 (-2.7,
+0.5 standard errors) and ahead in all 4 held-out cells, the Hell Knight at
+76.0% vs 74.0%, the Enforcer at 72.0% vs 69.0%, the Grunt at 60.0% vs
+62.7% (-2.7, 0.5 SE, with its known skill-3 trade-off -8.0), and the
+Shalrath holds its #56 result (32.7% vs 28.0% at skill 2). In the client,
+the seven classes are driven across four maps: e2m1's 46 monsters (types
+0-2) at 60 microseconds per decision, e2m5's 42 (types 3-4) at 58, e1m4's
+40 (21 Ogres type 3, 19 Knights type 6) at 59, and e4m7's 22 (types 4-5) at
+65 — the per-decision cost creeps with the model's width (models-v3's
+two-class client ran at 50-51). Released as `models-v7` with the
+seven-entry class map (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`,
+`monster_ogre 3`, `monster_hell_knight 4`, `monster_shalrath 5`,
+`monster_knight 6`).
