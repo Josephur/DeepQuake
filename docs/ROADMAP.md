@@ -542,3 +542,39 @@ two-class client ran at 50-51). Released as `models-v7` with the
 seven-entry class map (`monster_army 0`, `monster_dog 1`, `monster_enforcer 2`,
 `monster_ogre 3`, `monster_hell_knight 4`, `monster_shalrath 5`,
 `monster_knight 6`).
+
+Shared model, eighth type (2026-11-15, #58: `configs/roster10_demon.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, ogre, hell knight, shalrath, knight,
+demon1, the observation 119 + 8 = 127 wide, warm-started from the seven-type
+roster model with the Fiend's head taken from the **Dog's** — a melee closer,
+per the #55 mechanism). The Fiend is a pure melee monster with a leap, and
+the ctests pin it (the leap closes 100 to 48 units and the scratch lands, 7
+hits in 8 s). Trained on the union pool plus e1m6/e2m7, e2m4 held out;
+reward stays `damage`. Same M4 evaluation, the Fiend on its own maps:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps (e1m6/e2m7), stock Fiend | 46.0% | 95.0% | 99.0% | 99.0% |
+| Training maps, shared model's Fiend | 48.0% | 97.0% | 99.0% | 100.0% |
+| Held-out e2m4, stock Fiend | 62.0% | 84.0% | 86.0% | 88.0% |
+| Held-out e2m4, shared model's Fiend | 56.0% | 82.0% | 86.0% | 86.0% |
+
+**The stock Fiend saturates the task**: at skills 1-3 it kills the trained
+player opponent 95-99% of the time, so the cells are at ceiling and the
+#35 bar's "beats" reduces to "ties at ceiling" at skill 2 (99.0 vs 99.0)
+while skills 0/1/3 are ahead (+2.0/+2.0/+1.0). The Fiend is never behind
+stock on the training maps; on the held-out map it is 2-6 points behind in
+every cell, within the eval's own seed variance (the #55/#56 measurement,
+up to 14 points per cell on the same checkpoint). The other seven classes
+do not regress: the Dog is ahead of the stock Dog in all 8 cells (82.0% vs
+65.3% at training skill 3), the Enforcer at 78.0% vs 69.0% (+9.0), the
+Knight at 81.3% vs 77.3%, the Ogre at 86.0% vs 84.7%, the Hell Knight at
+75.3% vs 74.0%, the Shalrath holds its #56 result (32.0% vs 28.0%), and the
+Grunt at 60.0% vs 62.7% (-2.7, 0.5 SE, with its known skill-3 trade-off).
+In the client, the eight classes are driven across five maps: e2m1's 46
+monsters (types 0-2) at 52 microseconds per decision, e2m5's 48 (types 3-4,
+7) at 51, e1m4's 43 (types 3, 6-7) at 52, e4m7's 30 (types 4-5, 7) at 55,
+and e2m4's 44 (types 3-4, 12 Fiends type 7) at 53. Released as `models-v8`
+with the eight-entry class map (`monster_army 0`, `monster_dog 1`,
+`monster_enforcer 2`, `monster_ogre 3`, `monster_hell_knight 4`,
+`monster_shalrath 5`, `monster_knight 6`, `monster_demon1 7`).

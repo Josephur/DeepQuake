@@ -1032,6 +1032,107 @@ static int knight_attack(void)
     return 0;
 }
 
+/* An eighth class (#58): the Fiend is a pure melee monster with a leap -
+ * the spawn's entries are th_melee = Demon_MeleeAttack (the scratch) and
+ * th_missile = demon1_atta1 (the leap chain, its closing move). */
+static int fiend_drive(void)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m5", "monster_demon1", &index))
+        return 1;
+
+    float start[3];
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1;
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "fiend forward");
+    int count = dqsim_get_entities(entities, 2048);
+    int found = 0;
+    float moved = 0;
+    for (int i = 0; i < count; i++)
+        if (entities[i].index == index) {
+            found = 1;
+            for (int k = 0; k < 2; k++) {
+                float delta = entities[i].origin[k] - start[k];
+                moved += delta * delta;
+            }
+        }
+    CHECK(found, "the fiend vanished");
+    CHECK(sqrtf(moved) > 20.0f, "the fiend moved %.1f units in 2 s", sqrtf(moved));
+    printf("fiend: moved %.0f units in 2 s\n", sqrtf(moved));
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The melee scratch at contact range, and the leap from further out: the
+ * damage has to land, and the chains have to gate. */
+static int fiend_attack(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m5", "monster_demon1", &index))
+        return 1;
+    CHECK(place_player_visible(60.0f), "no free spot in the fiend's sight at 60 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "scratch steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the scratch");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("fiend: %d scratch hits in 8 s at 60 units, health %.0f -> %.0f\n", hits, before,
+           player.health);
+    CHECK(hits > 0, "the fiend never damaged the player: its melee chain does not reach "
+                    "Demon_MeleeAttack");
+    CHECK(hits <= 24, "the fiend hit the player %d times in 8 s: the chain is not gating",
+          hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+static int fiend_leap(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e2m5", "monster_demon1", &index))
+        return 1;
+    CHECK(place_player_visible(100.0f), "no free spot in the fiend's sight at 100 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    float closest = -1.0f;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "leap steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the leap");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+        float now = flat_distance(driven_origin, player.origin);
+        if (closest < 0.0f || now < closest)
+            closest = now;
+    }
+    printf("fiend: %d hits in 8 s from 100 units, closed to %.0f, health %.0f -> %.0f\n",
+           hits, closest, before, player.health);
+    CHECK(hits > 0, "the fiend never damaged the player from 100 units: its leap does not "
+                    "close or its scratch does not land");
+    CHECK(closest < 100.0f, "the fiend never closed below 100 units (closest %.0f)",
+          closest);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1073,7 +1174,8 @@ int main(int argc, char **argv)
     if (enforcer_drive() || enforcer_attack() || enforcer_aim_error() || ogre_attack() ||
         ogre_throw() || ogre_throw_aim_error() || hknight_drive() || hknight_attack() ||
         hknight_aim_error() || shalrath_stand_driven() || shalrath_attack() ||
-        shalrath_aim_error() || knight_drive() || knight_attack())
+        shalrath_aim_error() || knight_drive() || knight_attack() || fiend_drive() ||
+        fiend_attack() || fiend_leap())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

@@ -42,9 +42,9 @@ slice                 size   meaning
 ``[114]``             1      1 while a last-seen position is remembered
 ``[115]``             1      skill / 3 (Quake's ``skill``, 0-3)
 ``[116:119]``         3      style: aggression, caution, stealth (0-1)
-``[119:126]``         7      monster type, one-hot in :data:`MONSTER_TYPES`
+``[119:127]``         8      monster type, one-hot in :data:`MONSTER_TYPES`
                              order (0: Grunt, 1: Dog, 2: Enforcer, 3: Ogre,
-                             4: Hell Knight, 5: Shalrath, 6: Knight)
+                             4: Hell Knight, 5: Shalrath, 6: Knight, 7: Fiend)
 ====================  =====  ==============================================
 
 One observer serves one monster for one episode: call
@@ -57,8 +57,8 @@ The type input is what lets one network serve every monster type (#48,
 and the network's per-type output head is selected from the same one-hot. It
 is appended rather than prepended so a network trained on the 119-wide layout
 warm-starts by copying its input columns unchanged. The Enforcer through
-the Knight joined as the third through seventh types (#49, #53, #55, #56,
-#57): the hook reaches them, so all each needed was its place in this
+the Fiend joined as the third through eighth types (#49, #53, #55, #56,
+#57, #58): the hook reaches them, so all each needed was its place in this
 vocabulary.
 """
 
@@ -81,6 +81,7 @@ MONSTER_TYPES = (
     "monster_hell_knight",
     "monster_shalrath",
     "monster_knight",
+    "monster_demon1",
 )
 N_MONSTER_TYPES = len(MONSTER_TYPES)
 MONSTER_OBS_BASE_DIM = 2 * N_RAYS + 23
