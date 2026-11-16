@@ -42,10 +42,11 @@
 #include <onnxruntime_c_api.h>
 
 /* deepquake.monster.MONSTER_OBS_BASE_DIM, MEMORY_SECONDS and the type
- * vocabulary width (#48). A v1 model (models-v1) is 119 wide and has no
- * type input; a shared model appends one one-hot entry per type. */
+ * vocabulary width (#48; nine types since #59). A v1 model (models-v1) is
+ * 119 wide and has no type input; a shared model appends one one-hot entry
+ * per type. */
 #define DQ_MONSTER_OBS_BASE_DIM 119
-#define DQ_MONSTER_MAX_TYPES 8
+#define DQ_MONSTER_MAX_TYPES 9
 #define DQ_MONSTER_OBS_MAX (DQ_MONSTER_OBS_BASE_DIM + DQ_MONSTER_MAX_TYPES)
 #define DQ_MONSTER_MEMORY_SECONDS 5.0f
 /* deepquake.monster_env.MONSTER_SPEED: commanded forward/side speed the
@@ -55,7 +56,7 @@
 /* dq_model is a space-separated list; one session per model, and each
  * model names the monster classes it drives in "<path>.monsters". */
 #define DQ_MAX_MODELS 4
-#define DQ_MAX_CLASSES 8
+#define DQ_MAX_CLASSES 9
 #define DQ_MAX_PATH 512
 
 typedef struct dq_model_class {

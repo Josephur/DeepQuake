@@ -40,7 +40,7 @@ def _client(relative=(100.0, 0.0, 0.0), health=100.0):
 def test_layout_and_conditioning_inputs():
     observer = monster.MonsterObserver(skill=3, style=(0.0, 0.5, 1.0))
     obs = observer.observe(_hook())
-    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (127,)
+    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (128,)
     assert obs[BASE + 19] == 1.0  # skill 3 / 3
     assert list(obs[BASE + 20 : BASE + 23]) == [0.0, 0.5, 1.0]
     assert obs[BASE + 4] == pytest.approx(0.8)  # own health
@@ -61,6 +61,7 @@ def test_monster_type_is_a_one_hot_at_the_end():
         "monster_shalrath",
         "monster_knight",
         "monster_demon1",
+        "monster_shambler",
     )
     army = monster.MonsterObserver(monster_type="monster_army").observe(_hook())
     dog = monster.MonsterObserver(monster_type="monster_dog").observe(_hook())
@@ -70,21 +71,23 @@ def test_monster_type_is_a_one_hot_at_the_end():
     shalrath = monster.MonsterObserver(monster_type="monster_shalrath").observe(_hook())
     knight = monster.MonsterObserver(monster_type="monster_knight").observe(_hook())
     fiend = monster.MonsterObserver(monster_type="monster_demon1").observe(_hook())
+    shambler = monster.MonsterObserver(monster_type="monster_shambler").observe(_hook())
     type_slice = slice(monster.MONSTER_OBS_BASE_DIM, monster.MONSTER_OBS_DIM)
-    assert list(army[type_slice]) == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(dog[type_slice]) == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(enforcer[type_slice]) == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(ogre[type_slice]) == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(hell_knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-    assert list(shalrath[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-    assert list(knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    assert list(fiend[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    assert list(army[type_slice]) == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(dog[type_slice]) == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(enforcer[type_slice]) == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(ogre[type_slice]) == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(hell_knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(shalrath[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert list(knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    assert list(fiend[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert list(shambler[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     # Nothing else depends on the type: the rest of the vector is identical.
     base = monster.MONSTER_OBS_BASE_DIM
-    for other in (dog, enforcer, ogre, hell_knight, shalrath, knight, fiend):
+    for other in (dog, enforcer, ogre, hell_knight, shalrath, knight, fiend, shambler):
         np.testing.assert_array_equal(army[:base], other[:base])
     with pytest.raises(ValueError, match="monster type"):
-        monster.MonsterObserver(monster_type="monster_shambler")
+        monster.MonsterObserver(monster_type="monster_zombie")
 
 
 def test_visible_enemy_and_memory():
@@ -305,7 +308,7 @@ def test_the_dog_gets_its_own_type_input():
     assert out["classname"] == "monster_dog"
     assert out["hooked"] == out["index"]  # the hook report came from that Dog
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 ENFORCER_EPISODE = """
@@ -338,7 +341,7 @@ def test_the_enforcer_gets_its_own_type_input():
     assert out["classname"] == "monster_enforcer"
     assert out["hooked"] == out["index"]  # the hook report came from that Enforcer
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 OGRE_EPISODE = """
@@ -370,7 +373,7 @@ def test_the_ogre_gets_its_own_type_input():
     assert out["classname"] == "monster_ogre"
     assert out["hooked"] == out["index"]  # the hook report came from that Ogre
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 HELL_KNIGHT_EPISODE = """
@@ -402,7 +405,7 @@ def test_the_hell_knight_gets_its_own_type_input():
     assert out["classname"] == "monster_hell_knight"
     assert out["hooked"] == out["index"]  # the hook report came from that Hell Knight
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
 
 
 SHALRATH_EPISODE = """
@@ -414,7 +417,7 @@ env = monster_env.MonsterEnv(
     "e4m7", seed=5, monster="monster_shalrath",
     opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
 )
-obs = env.set_task(*monster_env.make_tasks(env, 1, 78)[0])
+obs = env.set_task(*monster_env.make_tasks(env, 1, 1)[0])
 entity = env._monster_entity()
 print(json.dumps({
     "shape": list(obs.shape),
@@ -428,13 +431,18 @@ print(json.dumps({
 
 @pytest.mark.gamedata
 def test_the_shalrath_gets_its_own_type_input():
-    """A Shalrath episode is hooked and carries the Shalrath one-hot (#56)."""
+    """A Shalrath episode is hooked and carries the Shalrath one-hot (#56).
+
+    The task seed is 1, not 78: e4m7's open stretches leave most fixed
+    draws without a line-of-sight-broken start 200-600 units out, and 78
+    raises deterministically (found by #59's local run; 1/3/6 place).
+    """
     require_gamedata()
     out = run_in_subprocess(SHALRATH_EPISODE, timeout=900)
     assert out["classname"] == "monster_shalrath"
     assert out["hooked"] == out["index"]  # the hook report came from that Shalrath
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
 
 KNIGHT_EPISODE = """
@@ -466,7 +474,7 @@ def test_the_knight_gets_its_own_type_input():
     assert out["classname"] == "monster_knight"
     assert out["hooked"] == out["index"]  # the hook report came from that Knight
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 
 
 FIEND_EPISODE = """
@@ -498,7 +506,44 @@ def test_the_fiend_gets_its_own_type_input():
     assert out["classname"] == "monster_demon1"
     assert out["hooked"] == out["index"]  # the hook report came from that Fiend
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+
+
+SHAMBLER_EPISODE = """
+import json
+from deepquake import monster, monster_env, sim
+
+sim.init()
+env = monster_env.MonsterEnv(
+    "e1m8", seed=5, monster="monster_shambler",
+    opponent=monster_env.PlayerOpponent("shooter"), skills=(2,),
+)
+obs = env.set_task(*monster_env.make_tasks(env, 1, 4)[0])
+entity = env._monster_entity()
+print(json.dumps({
+    "shape": list(obs.shape),
+    "type": [float(v) for v in obs[monster.MONSTER_OBS_BASE_DIM:]],
+    "classname": entity.classname,
+    "index": env.monster_index,
+    "hooked": env._hook_obs.entity_index,
+}))
+"""
+
+
+@pytest.mark.gamedata
+def test_the_shambler_gets_its_own_type_input():
+    """A Shambler episode is hooked and carries the Shambler one-hot (#59).
+
+    The task seed is 4, not 78: e1m8 is an open arena, most fixed draws
+    have no line-of-sight-broken start 200-600 units out, and 78 raises
+    deterministically (4/5/16 place; found by this issue's local run).
+    """
+    require_gamedata()
+    out = run_in_subprocess(SHAMBLER_EPISODE, timeout=900)
+    assert out["classname"] == "monster_shambler"
+    assert out["hooked"] == out["index"]  # the hook report came from that Shambler
+    assert out["shape"] == [monster.MONSTER_OBS_DIM]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
 
 NO_ENFORCER_EPISODES = """

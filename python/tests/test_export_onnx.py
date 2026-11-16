@@ -120,6 +120,7 @@ def test_export_shared_model_writes_the_class_map(tmp_path):
                 "monster_shalrath",
                 "monster_knight",
                 "monster_demon1",
+                "monster_shambler",
             ],
         },
     )
@@ -129,7 +130,7 @@ def test_export_shared_model_writes_the_class_map(tmp_path):
     expected_map = (
         "monster_army 0\nmonster_dog 1\nmonster_enforcer 2\nmonster_ogre 3\n"
         "monster_hell_knight 4\nmonster_shalrath 5\nmonster_knight 6\n"
-        "monster_demon1 7\n"
+        "monster_demon1 7\nmonster_shambler 8\n"
     )
     assert (tmp_path / "shared.onnx.monsters").read_text() == expected_map
     nvec_line = (tmp_path / "shared.onnx.nvec").read_text().splitlines()[0]

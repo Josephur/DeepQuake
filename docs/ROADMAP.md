@@ -578,3 +578,55 @@ and e2m4's 44 (types 3-4, 12 Fiends type 7) at 53. Released as `models-v8`
 with the eight-entry class map (`monster_army 0`, `monster_dog 1`,
 `monster_enforcer 2`, `monster_ogre 3`, `monster_hell_knight 4`,
 `monster_shalrath 5`, `monster_knight 6`, `monster_demon1 7`).
+
+Shared model, ninth type (2026-11-16, #59: `configs/roster11_shambler.toml`,
+`MONSTER_TYPES` = army, dog, enforcer, ogre, hell knight, shalrath, knight,
+demon1, shambler, the observation 119 + 9 = 128 wide, warm-started from the
+eight-type roster model with the Shambler's head taken from the **Hell
+Knight's** — a melee-and-beam hybrid, the closest mechanical shape among the
+trained types, per the #55 mechanism). The Shambler needs no new hook rule:
+its attack entry is the `sham_melee` dispatcher (the claw at melee range,
+the lightning beam at range, chain `sham_magic1..12` launching through
+`CastLightning`), which the #53 rules reach unchanged — and although
+`CastLightning` matches no fire/shot/missile name rule, the skill handicap
+still moves the beam, proven by state hash (the clean and 45°-error windows
+differ). The ctests pin the drive (92 units in 2 s), the claw (2 hits in
+8 s at 60 units, health 100 → -22) and the beam (9 hits in 8 s at 300
+units). Trained on the union pool plus e1m8/e3m4 (e1m6 already in it; 19
+maps, 19 envs, 10,000,384 decisions at about 2,720 steps/s), e1m3 held out;
+reward stays `damage`. Same M4 evaluation, the Shambler on its own maps:
+
+| Player-death rate | skill 0 | skill 1 | skill 2 | skill 3 |
+| --- | --- | --- | --- | --- |
+| Training maps (e1m8/e3m4/e1m6), stock Shambler | 62.0% | 94.0% | 72.7% | 75.3% |
+| Training maps, shared model's Shambler | 59.3% | 88.7% | **74.7%** | 74.7% |
+| Held-out e1m3, stock Shambler | void | void | 84.0% | 90.0% |
+| Held-out e1m3, shared model's Shambler | void | void | 80.0% | **94.0%** |
+
+The Shambler beats the stock Shambler at skill 2 on the training maps (the
+#35 bar) by 2.0 points; its other training cells sit within about one
+standard error (skills 0/1/3: -2.7/-5.3/-0.7). The held-out e1m3 cells at
+skills 0/1 are void (0% both sides with no damage timings: skills 0/1 stock
+too few Shamblers there for placement to succeed — sparse stocking, the
+Shalrath's recorded property from #56); at skill 3 the held-out cell is
+ahead (+4.0) and at skill 2 behind (-4.0), both within the eval's own seed
+variance (the #55/#56 reference, up to 14 points per cell). The other eight
+classes do not regress beyond that variance: the Dog is ahead of the stock
+Dog in 7 of its 8 cells and equal in the eighth (76.0% vs 65.3% at training
+skill 3), the Knight at 81.3% vs 77.3% (holding #57), the Ogre at 87.3% vs
+84.7%, the Hell Knight at 74.7% vs 74.0%, the Enforcer at 70.0% vs 69.0%,
+the Fiend ties its saturated baseline (99.0 vs 99.0 at skill 2, the #58
+ruling), the Shalrath holds #56 (32.0% vs 28.0%), and the Grunt at 58.7%
+vs 62.7% (-4.0, 0.7 SE, with its known skill-3 trade-off). The client's
+accepted shared-model width had to grow with the vocabulary
+(`DQ_MONSTER_MAX_TYPES`/`DQ_MAX_CLASSES` 8 → 9): the first client check
+refused the 128-wide model with a clear log line, which is the bound doing
+its job. In the client, the nine classes are driven across three maps:
+e1m8's 27 monsters (24 Ogres and 3 Shamblers, type 8) at 67-74
+microseconds per decision, e2m6's 55 monsters of five classes at once (16
+Ogres, 14 Hell Knights, 2 Shalraths, 18 Fiends, 5 Shamblers) at 72-73, and
+e2m1's 46 (types 0-2) at 72-73.
+Released as `models-v9` with the nine-entry class map (`monster_army 0`,
+`monster_dog 1`, `monster_enforcer 2`, `monster_ogre 3`,
+`monster_hell_knight 4`, `monster_shalrath 5`, `monster_knight 6`,
+`monster_demon1 7`, `monster_shambler 8`).

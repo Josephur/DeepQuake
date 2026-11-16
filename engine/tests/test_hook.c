@@ -1133,6 +1133,150 @@ static int fiend_leap(void)
     return 0;
 }
 
+/* A ninth class (#59): the Shambler. The attack entry is sham_melee (a
+ * dispatcher: the claw at melee range, the LIGHTNING BEAM at range - the
+ * beam chain is sham_magic1..12 and its launch helper is CastLightning,
+ * which the fire/shot/missile name rule does not match). The ctests measure
+ * what actually happens, and the aim proof is the state-hash comparison. */
+static int shambler_drive(void)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m8", "monster_shambler", &index))
+        return 1;
+
+    float start[3];
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1;
+    CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "shambler forward");
+    int count = dqsim_get_entities(entities, 2048);
+    int found = 0;
+    float moved = 0;
+    for (int i = 0; i < count; i++)
+        if (entities[i].index == index) {
+            found = 1;
+            for (int k = 0; k < 2; k++) {
+                float delta = entities[i].origin[k] - start[k];
+                moved += delta * delta;
+            }
+        }
+    CHECK(found, "the shambler vanished");
+    CHECK(sqrtf(moved) > 20.0f, "the shambler moved %.1f units in 2 s", sqrtf(moved));
+    printf("shambler: moved %.0f units in 2 s\n", sqrtf(moved));
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The claw at melee range: the damage has to land, and the chain has to
+ * gate. */
+static int shambler_claw(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m8", "monster_shambler", &index))
+        return 1;
+    CHECK(place_player_visible(60.0f), "no free spot in the shambler's sight at 60 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "claw steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the claw");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("shambler: %d claw hits in 8 s at 60 units, health %.0f -> %.0f\n", hits, before,
+           player.health);
+    CHECK(hits > 0, "the shambler never damaged the player: its melee chain does not reach "
+                    "ShamClaw");
+    CHECK(hits <= 24, "the shambler hit the player %d times in 8 s: the chain is not gating",
+          hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The beam at range: the damage has to land from outside claw range. */
+static int shambler_beam(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start("e1m8", "monster_shambler", &index))
+        return 1;
+    CHECK(place_player_visible(300.0f), "no free spot in the shambler's sight at 300 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+
+    float before = player.health;
+    float health = before;
+    int hits = 0;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "beam steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the beam");
+        if (health - player.health > 0.5f)
+            hits++;
+        health = player.health;
+    }
+    printf("shambler: %d beam hits in 8 s at 300 units, health %.0f -> %.0f\n", hits, before,
+           player.health);
+    CHECK(hits > 0, "the shambler never damaged the player at range: its magic chain does "
+                    "not reach the beam");
+    CHECK(hits <= 16, "the shambler hit the player %d times in 8 s: the chain is not gating",
+          hits);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The aim error reaches the beam: the clean and 45-degree windows compared
+ * by state hash. */
+static int shambler_aim_error(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    int index;
+    uint64_t clean_hash, error_hash;
+
+    if (driven_start("e1m8", "monster_shambler", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override off: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(300.0f), "no free spot in the shambler's sight at 300 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "clean beam steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the clean beam");
+    }
+    clean_hash = dqsim_state_hash();
+    printf("shambler: clean window hash %llu\n", (unsigned long long)clean_hash);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+
+    if (driven_start("e1m8", "monster_shambler", &index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 45.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    CHECK(place_player_visible(300.0f), "no free spot in the shambler's sight at 300 units");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range for the error window");
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 8 && player.health > 10.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "aim error beam steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the aim error");
+    }
+    error_hash = dqsim_state_hash();
+    printf("shambler: 45 degree error window hash %llu\n", (unsigned long long)error_hash);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+
+    CHECK(clean_hash != 0 && error_hash != 0, "a shambler window failed");
+    CHECK(clean_hash != error_hash, "the aim error did not change the shambler's beam");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1175,7 +1319,8 @@ int main(int argc, char **argv)
         ogre_throw() || ogre_throw_aim_error() || hknight_drive() || hknight_attack() ||
         hknight_aim_error() || shalrath_stand_driven() || shalrath_attack() ||
         shalrath_aim_error() || knight_drive() || knight_attack() || fiend_drive() ||
-        fiend_attack() || fiend_leap())
+        fiend_attack() || fiend_leap() || shambler_drive() || shambler_claw() ||
+        shambler_beam() || shambler_aim_error())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

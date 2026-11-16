@@ -1,0 +1,83 @@
+# The nine-type roster run (#59): one shared policy for the Grunt, the Dog,
+# the Enforcer, the Ogre, the Hell Knight, the Shalrath, the Knight, the
+# Fiend and the Shambler, warm started from the eight-type roster model. The
+# trunk and the recurrent core are shared; the monster type comes in as a
+# one-hot appended to the observation (deepquake.monster.MONSTER_TYPES), and
+# each type has its own policy head, so one ONNX model can drive a mixed
+# level.
+#
+# The Shambler is a melee-and-beam hybrid (the claw at melee range, the
+# lightning beam at range), measured in the #59 ctests; the sparse stocking
+# (2-3 Shamblers on its new maps) means sparse training episodes - a
+# recorded property of the class.
+#
+# Reward: "damage" (the #51 fix) - the dense (dealt - taken)/100 per-step term
+# is what keeps the melee types committing to closing.
+#
+# Maps: the union of the class pools (the previous seventeen plus e1m8/e3m4,
+# the Shambler's stocked maps - 3 and 1 of them; e1m6 with 2 is already in).
+# Held out: e3m1 (since #48), e3m2 (the Ogre's, #53), e3m6 (the Hell
+# Knight's, #55), e4m8 (the Shalrath's, #56), e1m5 (the Knight's, #57),
+# e2m4 (the Fiend's, #58) and e1m3 (3 Shamblers, the Shambler's held-out
+# map).
+#   uv run python -m deepquake.train_monster configs/roster11_shambler.toml
+name = "roster11_shambler"
+monsters = [
+  "monster_army",
+  "monster_dog",
+  "monster_enforcer",
+  "monster_ogre",
+  "monster_hell_knight",
+  "monster_shalrath",
+  "monster_knight",
+  "monster_demon1",
+  "monster_shambler",
+]
+# The four-type roster checkpoint: its GRU, its policy heads and its value
+# head are copied, the new type column is zeroed, so the shared network
+# starts out playing exactly like the released model. The Hell Knight's head
+# starts from the last source head (the Ogre's), which init_from does by
+# index.
+init_from = "runs/roster10_demon/checkpoint.pt"
+# The Shambler is a melee-and-beam hybrid; its head starts from the Hell
+# Knight's head - a beam-and-claw hybrid, the closest mechanical shape among
+# the trained types - per the #55 mechanism. The melee-and-beam match beats
+# the default last-head rule (the Fiend's leap).
+init_head_from = { monster_shambler = "monster_hell_knight" }
+maps = [
+  "e1m1", "e2m1", "e4m1", "e1m2", "e2m2", "e4m2", "e2m3", "e2m5", "e4m5",
+  "e2m6", "e4m6", "e4m7", "e1m4", "e4m3", "e4m4", "e1m6", "e2m7", "e1m8",
+  "e3m4",
+]
+held_out = ["e3m1", "e3m2", "e3m6", "e4m8", "e1m5", "e2m4", "e1m3"]
+envs = 19
+opponents = [
+  { kind = "shooter" },
+  { kind = "random" },
+  { kind = "trained", checkpoint = "runs/combat_grunt_fightstart/checkpoint.pt" },
+]
+skills = [0, 1, 2, 3]
+styles = [
+  { style = [1.0, 0.0, 0.0] },
+  { style = [0.0, 1.0, 0.0] },
+  { style = [0.0, 0.0, 1.0] },
+  { style = [0.5, 0.5, 0.5] },
+]
+reward = "damage"
+seed = 0
+total_steps = 10000000
+device = "3090"
+timeout_steps = 600
+checkpoint_every = 25
+
+[ppo]
+steps_per_env = 256
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+entropy_coef = 0.01
+hidden = 256
+bptt = 32
