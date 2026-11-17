@@ -26,6 +26,35 @@ from . import REPO_ROOT, monster, monster_env, ppo
 from .vec import ProcVecEnv
 
 
+def throughput_warning(
+    window_rate: float, first_rate: float | None, low: bool
+) -> tuple[str | None, bool]:
+    """Warn when a window's steps/s drops below 75% of the run's first (#54).
+
+    Returns the message to print (``None`` when quiet) and the new low
+    state, so the warning fires once per drop and recovery is logged. The
+    recorded cause of a mid-run halving was the miner sharing the learner's
+    GPU; the guard names that so the next regression is noticed mid-run
+    instead of after.
+    """
+    if first_rate is None or first_rate <= 0:
+        return None, low
+    if window_rate < 0.75 * first_rate:
+        message = (
+            None
+            if low
+            else (
+                f"WARNING: {window_rate:,.0f} steps/s is under 75% of the first "
+                f"window's {first_rate:,.0f} (#54: is something else on the GPU, "
+                "like the miner?)"
+            )
+        )
+        return message, True
+    if low:
+        return f"throughput back above 75% of the first window ({window_rate:,.0f} steps/s)", False
+    return None, False
+
+
 def opponent_list(config: dict) -> list[monster_env.PlayerOpponent]:
     """The player opponents of a run, in worker order."""
     entries = config.get("opponents")
@@ -195,6 +224,9 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
                 )
             started = time.time()
             update = 0
+            first_rate = None  # the run's first window; #54's guard reference
+            low = False
+            prev_steps, prev_time = start_steps, started
             while learner.total_steps < config["total_steps"]:
                 stats = learner.update()
                 update += 1
@@ -209,6 +241,14 @@ def train(config: dict, *, resume: bool = False, max_updates: int | None = None)
                     ]
                 )
                 log_file.flush()
+                now = time.time()
+                window_rate = (stats["total_steps"] - prev_steps) / max(now - prev_time, 1e-9)
+                prev_steps, prev_time = stats["total_steps"], now
+                if update == 1:
+                    first_rate = window_rate
+                message, low = throughput_warning(window_rate, first_rate, low)
+                if message:
+                    print(message, flush=True)
                 rate = (stats["total_steps"] - start_steps) / (time.time() - started)
                 print(
                     f"steps {stats['total_steps']:>9,}  win "

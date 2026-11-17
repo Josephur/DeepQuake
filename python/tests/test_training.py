@@ -541,3 +541,26 @@ def test_the_memory_persists_across_rollouts():
         # first rollout ended in (unless an episode end zeroed it).
         kept = (1.0 - first["done"][-1])[:, None]
         np.testing.assert_allclose(second["hid"][0], first["next_hidden"] * kept)
+
+
+def test_throughput_guard_warns_once_and_logs_recovery():
+    """#54: the guard fires once per drop below 75% of the first window."""
+    from deepquake import train_monster
+
+    # No reference window yet: quiet, state unchanged.
+    message, low = train_monster.throughput_warning(500.0, None, False)
+    assert message is None and low is False
+    # A drop fires the warning once...
+    message, low = train_monster.throughput_warning(500.0, 1000.0, False)
+    assert message is not None and "#54" in message and low is True
+    # ...and stays quiet while the drop persists.
+    message, low = train_monster.throughput_warning(480.0, 1000.0, True)
+    assert message is None and low is True
+    # Recovery is logged once.
+    message, low = train_monster.throughput_warning(900.0, 1000.0, True)
+    assert message is not None and "back above" in message and low is False
+    message, low = train_monster.throughput_warning(950.0, 1000.0, False)
+    assert message is None and low is False
+    # A first window of zero (a stalled start) is not a reference.
+    message, low = train_monster.throughput_warning(500.0, 0.0, False)
+    assert message is None and low is False
