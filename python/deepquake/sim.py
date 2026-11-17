@@ -90,6 +90,7 @@ class _Entity(ctypes.Structure):
         ("health", ctypes.c_float),
         ("solid", ctypes.c_int32),
         ("flags", ctypes.c_int32),
+        ("frame", ctypes.c_int32),
     ]
 
 
@@ -191,6 +192,7 @@ class Entity:
     health: float
     solid: int
     flags: int
+    frame: int = 0  # model animation frame the entity is showing (#61)
 
 
 @dataclass(frozen=True)
@@ -503,6 +505,7 @@ def entities() -> list[Entity]:
             health=e.health,
             solid=e.solid,
             flags=e.flags,
+            frame=e.frame,
         )
         for e in buffer[:count]
     ]

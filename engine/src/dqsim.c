@@ -455,6 +455,7 @@ static int copy_entities(dqsim_entity *out, int max)
             e->health = ent->v.health;
             e->solid = (int)ent->v.solid;
             e->flags = (int)ent->v.flags;
+            e->frame = (int)ent->v.frame;
         }
         count++;
     }

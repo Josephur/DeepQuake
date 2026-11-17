@@ -73,3 +73,6 @@ dist/
 # Scratch copies of the engine for tracing and debugging (see AGENTS.md)
 # ---------------------------------------------------------------------------
 /engine/.scratch/
+
+# Isolated git worktrees for parallel issue work
+/.worktrees/

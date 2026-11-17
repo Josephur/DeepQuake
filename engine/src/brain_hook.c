@@ -30,6 +30,9 @@
  * and empty on release, clear, and every level start. A fixed table, so
  * nominating never allocates and never fails for want of memory. */
 #define DQ_MAX_FIRE_THINKS 4
+/* The longest stock stand/run chain is well under this (the Shambler stands
+ * in 17 states, the Dog and Shalrath run in 12); the walk caps here. */
+#define DQ_MAX_ANIM_FRAMES 32
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
@@ -49,8 +52,17 @@ typedef struct dq_hook_slot {
      * is a pounce, and one entry execution per decision cannot charge with
      * it. 0 = the class sets none. */
     func_t melee_think, missile_think;
-    float stand_frame, run_frame;
-    int run_frames;
+    /* The stand and run animations as the stock QuakeC actually plays them:
+     * the frame of each state in the chain, in order (#61). Cycling these
+     * sequences - rather than offsetting from the first frame - keeps every
+     * frame the hook sets one the class's own states set, so a chain that is
+     * shorter than eight states, a single-state stand (the Shalrath), or a
+     * run that loops back onto an earlier frame (the Shalrath's run12) can
+     * never name a frame the model does not have. */
+    float stand_seq[DQ_MAX_ANIM_FRAMES];
+    int stand_len;
+    float run_seq[DQ_MAX_ANIM_FRAMES];
+    int run_len;
     unsigned anim_tick;
     dq_handicap_state handicap;
     int skill;
@@ -498,6 +510,34 @@ static float state_frame(func_t fnum)
     return pr_globals[statement->a];
 }
 
+/* Collect the frames of a stand/run chain in play order (#61): follow each
+ * state's next think, recording its frame, until the chain loops back on a
+ * state already seen, leaves the animation states, or fills the table. The
+ * result is exactly the cycle the stock QuakeC animates - including a run
+ * whose last state reuses an earlier frame - so every entry is a frame the
+ * class's model has. Returns the number of frames collected. */
+static int walk_chain_frames(func_t start, float *out, int max)
+{
+    func_t visited[DQ_MAX_ANIM_FRAMES];
+    int n = 0;
+    for (func_t f = start; f && n < max; f = chain_next(f)) {
+        int seen = 0;
+        for (int i = 0; i < n; i++)
+            if (visited[i] == f) {
+                seen = 1;
+                break;
+            }
+        if (seen)
+            break;
+        float frame = state_frame(f);
+        if (frame < 0.0f)
+            break;
+        visited[n] = f;
+        out[n++] = frame;
+    }
+    return n;
+}
+
 /* Is this think one of the monster's own decision states? The class's
  * prefix is not always its classname (#49): the Enforcer's states are
  * "enf_stand1" and friends, not "monster_enforcer_stand1". The first
@@ -682,10 +722,11 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         /* Animate from the state functions' own frames: run while moving,
          * stand while still, advancing at the QuakeC think cadence. */
         slot->anim_tick++;
-        if (speed > 0.01f && slot->run_frame >= 0)
-            ent->v.frame = slot->run_frame + (float)((slot->anim_tick / 7) % slot->run_frames);
-        else if (slot->stand_frame >= 0)
-            ent->v.frame = slot->stand_frame + (float)((slot->anim_tick / 7) % 8);
+        unsigned step = slot->anim_tick / 7;
+        if (speed > 0.01f && slot->run_len > 0)
+            ent->v.frame = slot->run_seq[step % (unsigned)slot->run_len];
+        else if (slot->stand_len > 0)
+            ent->v.frame = slot->stand_seq[step % (unsigned)slot->stand_len];
         ent->v.think = fnum;
         ent->v.nextthink = (float)(sv.time + host_frametime);
     }
@@ -870,38 +911,33 @@ static int decision_think_prefix(const char *name, char *out, size_t size)
 }
 
 /* Resolve everything the hook needs from a class's QuakeC prefix: the stand
- * and run frames it animates with, the function that starts an attack, and
- * the attack-sequence function that fires the shot (the aim error acts
- * there). The prefix is only kept when the class's frames are found, so a
- * think that is not a class's own state cannot change it. */
+ * and run frame sequences it animates with, and the function that starts an
+ * attack (the aim error acts on the attack-sequence frames, found separately).
+ * The sequences are walked from the stock states themselves (#61), so they
+ * are correct for any chain length or shape. The prefix is only kept when the
+ * class's frames are found, so a think that is not a class's own state cannot
+ * change it. */
 static int resolve_prefix(dq_hook_slot *slot, const char *prefix)
 {
     char name[40];
-    float stand_frame, run_frame;
-    int run_frames = 0;
+    func_t stand_start, run_start;
 
     q_snprintf(name, sizeof(name), "%sstand1", prefix);
-    stand_frame = state_frame(find_function(name));
-    if (stand_frame < 0.0f) {
+    stand_start = find_function(name);
+    if (!stand_start) {
         /* The digitless single-state stand: the Shalrath's "shal_stand" (#56). */
         q_snprintf(name, sizeof(name), "%sstand", prefix);
-        stand_frame = state_frame(find_function(name));
+        stand_start = find_function(name);
     }
     q_snprintf(name, sizeof(name), "%srun1", prefix);
-    run_frame = state_frame(find_function(name));
-    for (int i = 1; i <= 24; i++) {
-        q_snprintf(name, sizeof(name), "%srun%d", prefix, i);
-        if (!find_function(name))
-            break;
-        run_frames = i;
-    }
-    if (stand_frame < 0.0f && run_frame < 0.0f)
+    run_start = find_function(name);
+
+    slot->stand_len = walk_chain_frames(stand_start, slot->stand_seq, DQ_MAX_ANIM_FRAMES);
+    slot->run_len = walk_chain_frames(run_start, slot->run_seq, DQ_MAX_ANIM_FRAMES);
+    if (slot->stand_len == 0 && slot->run_len == 0)
         return 0; /* not a class with the usual frames: leave the slot alone */
 
     q_strlcpy(slot->prefix, prefix, sizeof(slot->prefix));
-    slot->stand_frame = stand_frame;
-    slot->run_frame = run_frame;
-    slot->run_frames = run_frames > 0 ? run_frames : 1;
     slot->attack_think = find_attack_think(slot->prefix);
     return 1;
 }

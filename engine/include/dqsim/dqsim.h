@@ -84,6 +84,7 @@ typedef struct dqsim_entity {
     float health;
     int32_t solid;      /* 0 not, 1 trigger, 2 bbox, 3 slidebox, 4 bsp */
     int32_t flags;      /* QuakeC FL_* bits: 32 monster, 256 item, 8 client */
+    int32_t frame;      /* model animation frame the entity is showing (#61) */
 } dqsim_entity;
 
 /* Library version as "major.minor.patch". The string is static. */

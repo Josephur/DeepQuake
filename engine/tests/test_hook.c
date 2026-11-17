@@ -1277,6 +1277,145 @@ static int shambler_aim_error(void)
     return 0;
 }
 
+/* Every frame a driven monster shows must be one its model has (#61). The old
+ * animation offset from the first frame by a hard-coded count, which named a
+ * frame past the end of the Shalrath's 35-frame model (its run chain loops back
+ * onto an earlier frame), so the client drew nothing and the monster blinked.
+ * The fix walks each class's real stand/run chains; this pins the result against
+ * the model's frame count, an independent ground truth. numframes is the stock
+ * .mdl's frame total for the class. */
+static int frame_bound(const char *map, const char *classname, int numframes)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    int index;
+    if (driven_start(map, classname, &index))
+        return 1;
+
+    int stand_max = -1, run_max = -1;
+    driven_mode = 0; /* still: the stand animation */
+    for (int t = 0; t < 72; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "%s stand tick", classname);
+        int count = dqsim_get_entities(entities, 2048);
+        for (int i = 0; i < count; i++)
+            if (entities[i].index == index) {
+                CHECK(entities[i].frame >= 0 && entities[i].frame < numframes,
+                      "%s stand frame %d outside the model's %d frames", classname,
+                      entities[i].frame, numframes);
+                if (entities[i].frame > stand_max)
+                    stand_max = entities[i].frame;
+            }
+    }
+
+    float start[3];
+    memcpy(start, driven_origin, sizeof(start));
+    driven_mode = 1; /* forward: the run animation (no enemy in sight, so the
+                      * reaction delay never gates it) */
+    for (int t = 0; t < 144; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "%s run tick", classname);
+        int count = dqsim_get_entities(entities, 2048);
+        for (int i = 0; i < count; i++)
+            if (entities[i].index == index) {
+                CHECK(entities[i].frame >= 0 && entities[i].frame < numframes,
+                      "%s run frame %d outside the model's %d frames", classname,
+                      entities[i].frame, numframes);
+                if (entities[i].frame > run_max)
+                    run_max = entities[i].frame;
+            }
+    }
+    float dx = driven_origin[0] - start[0], dy = driven_origin[1] - start[1];
+    float moved = sqrtf(dx * dx + dy * dy);
+    CHECK(moved > 20.0f, "the %s moved only %.1f units, so the run path was not exercised",
+          classname, moved);
+    printf("%s: frames in range (stand max %d, run max %d, model %d frames)\n", classname,
+           stand_max, run_max, numframes);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+static int animation_frames(void)
+{
+    /* The stocking maps the per-class tests already use, and each stock model's
+     * frame total. The Shalrath is the regression: 35 frames, run max must stay
+     * at 34, never 35. */
+    if (frame_bound("e1m1", "monster_army", 114) ||
+        frame_bound("e1m1", "monster_dog", 86) ||
+        frame_bound("e2m1", "monster_enforcer", 102) ||
+        frame_bound("e1m4", "monster_ogre", 147) ||
+        frame_bound("e2m5", "monster_hell_knight", 166) ||
+        frame_bound("e3m7", "monster_shalrath", 35) ||
+        frame_bound("e1m4", "monster_knight", 97) ||
+        frame_bound("e2m5", "monster_demon1", 69) ||
+        frame_bound("e1m8", "monster_shambler", 94))
+        return 1;
+    return 0;
+}
+
+/* Driven monsters walk and run continuously (#61): no per-tick horizontal jump
+ * beyond the class's top speed. Many monsters at once, as in play. The vertical
+ * step-downs off ledges (up to the 18-unit step height) are normal MOVETYPE_STEP
+ * behaviour and are not horizontal teleports. Lunges/leaps are attacks, covered
+ * by the dog/fiend tests; this drives plain locomotion. */
+static void locomotion_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action,
+                              void *user)
+{
+    (void)user;
+    action->desired_yaw = obs->angles[1];
+    action->forward = 200.0f;
+}
+
+static int movement_continuity(void)
+{
+    static dqsim_entity entities[2048];
+    static float prev[2048][3];
+    static int have_prev[2048];
+    const dqsim_action idle = {0};
+    const float max_step = 8.5f; /* (400 u/s top run speed / 72 ticks) * 1.5 */
+
+    CHECK(dqsim_load_map("e1m1", 2, 23) == DQSIM_OK, "load e1m1");
+    int count = dqsim_get_entities(entities, 2048);
+    int nominated = 0;
+    for (int i = 0; i < count; i++) {
+        if (!(entities[i].flags & 32)) /* FL_MONSTER */
+            continue;
+        CHECK(dqsim_set_policy_hook(entities[i].index, locomotion_policy, NULL) == DQSIM_OK,
+              "nominate %d: %s", entities[i].index, dqsim_last_error());
+        nominated++;
+    }
+    CHECK(nominated >= 8, "only %d monsters to drive", nominated);
+
+    memset(have_prev, 0, sizeof(have_prev));
+    float max_horizontal = 0.0f;
+    int jumps = 0;
+    for (int t = 0; t < 72 * 5; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "locomotion tick");
+        int n = dqsim_get_entities(entities, 2048);
+        for (int i = 0; i < n; i++) {
+            int idx = entities[i].index;
+            if (!(entities[i].flags & 32) || idx >= 2048)
+                continue;
+            if (have_prev[idx]) {
+                float dx = entities[i].origin[0] - prev[idx][0];
+                float dy = entities[i].origin[1] - prev[idx][1];
+                float horizontal = sqrtf(dx * dx + dy * dy);
+                if (horizontal > max_horizontal)
+                    max_horizontal = horizontal;
+                if (horizontal > max_step)
+                    jumps++;
+            }
+            prev[idx][0] = entities[i].origin[0];
+            prev[idx][1] = entities[i].origin[1];
+            prev[idx][2] = entities[i].origin[2];
+            have_prev[idx] = 1;
+        }
+    }
+    printf("movement: %d monsters, max horizontal per-tick %.2f units, teleports %d\n",
+           nominated, max_horizontal, jumps);
+    CHECK(jumps == 0, "%d horizontal teleports in 5 s of locomotion", jumps);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1320,7 +1459,8 @@ int main(int argc, char **argv)
         hknight_aim_error() || shalrath_stand_driven() || shalrath_attack() ||
         shalrath_aim_error() || knight_drive() || knight_attack() || fiend_drive() ||
         fiend_attack() || fiend_leap() || shambler_drive() || shambler_claw() ||
-        shambler_beam() || shambler_aim_error())
+        shambler_beam() || shambler_aim_error() || animation_frames() ||
+        movement_continuity())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,
