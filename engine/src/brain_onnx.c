@@ -52,6 +52,11 @@
 /* deepquake.monster_env.MONSTER_SPEED: commanded forward/side speed the
  * policy was trained with (the engine's monster physics cap what moves). */
 #define DQ_MONSTER_SPEED 400.0f
+/* deepquake.nav.FRAME_SKIP: ticks per decision the policy was trained with
+ * (12 decisions/s). The turn action is a delta applied ONCE per decision and
+ * the whole action is held for the block; deciding every engine tick instead
+ * accumulates the turn ~6x too fast and the monster spins/darts (#61). */
+#define DQ_FRAME_SKIP 6
 #define DQ_MONSTER_MAX_HIDDEN 256
 /* dq_model is a space-separated list; one session per model, and each
  * model names the monster classes it drives in "<path>.monsters". */
@@ -98,6 +103,13 @@ typedef struct dq_monster_state {
     int skill;
     /* Which entry of the model's type one-hot this monster is (#48). */
     int type_index;
+    /* Decision cadence (#61): the action is held for DQ_FRAME_SKIP ticks like
+     * training. skip counts the holds left before the next inference; the held
+     * forward/side/attack are replayed on the holds (yaw is already held above). */
+    int skip;
+    float held_forward;
+    float held_side;
+    int held_attack;
 } dq_monster_state;
 
 static dq_monster_state monster_states[DQ_BRAIN_MAX_MONSTERS];
@@ -447,6 +459,18 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
                         void *user)
 {
     dq_monster_state *state = user;
+    /* Hold the last decision for the rest of its block (#61): the policy was
+     * trained deciding every DQ_FRAME_SKIP ticks, so re-deciding every engine
+     * tick would accumulate the turn delta ~6x too fast and the monster would
+     * spin/dart. Replay the held action without inferring. */
+    if (state->skip > 0) {
+        state->skip--;
+        action->desired_yaw = state->yaw;
+        action->forward = state->held_forward;
+        action->side = state->held_side;
+        action->attack = state->held_attack;
+        return;
+    }
     dq_model *model = state->model;
     const OrtApi *api = ort();
 
@@ -509,6 +533,11 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
     action->forward = (actions[0] - 1) * DQ_MONSTER_SPEED;
     action->side = (1 - actions[1]) * DQ_MONSTER_SPEED;
     action->attack = actions[3] != 0;
+    /* Hold this decision for the block, as in training (#61). */
+    state->held_forward = action->forward;
+    state->held_side = action->side;
+    state->held_attack = action->attack;
+    state->skip = DQ_FRAME_SKIP - 1;
 }
 
 static void register_cvars(void);
