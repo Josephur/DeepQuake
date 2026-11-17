@@ -1351,11 +1351,12 @@ static int animation_frames(void)
     return 0;
 }
 
-/* Driven monsters walk and run continuously (#61): no per-tick horizontal jump
- * beyond the class's top speed. Many monsters at once, as in play. The vertical
- * step-downs off ledges (up to the 18-unit step height) are normal MOVETYPE_STEP
- * behaviour and are not horizontal teleports. Lunges/leaps are attacks, covered
- * by the dog/fiend tests; this drives plain locomotion. */
+/* Driven monsters walk and run continuously (#61): over a 30 s window, no
+ * per-tick horizontal jump beyond the class's top speed. Many monsters at once,
+ * as in play. The vertical step-downs off ledges (up to the 18-unit step height)
+ * are normal MOVETYPE_STEP behaviour and are not horizontal teleports.
+ * Lunges/leaps are attacks, bounded by the dog/fiend tests; this drives plain
+ * locomotion. */
 static void locomotion_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action,
                               void *user)
 {
@@ -1387,7 +1388,7 @@ static int movement_continuity(void)
     memset(have_prev, 0, sizeof(have_prev));
     float max_horizontal = 0.0f;
     int jumps = 0;
-    for (int t = 0; t < 72 * 5; t++) {
+    for (int t = 0; t < 72 * 30; t++) {
         CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "locomotion tick");
         int n = dqsim_get_entities(entities, 2048);
         for (int i = 0; i < n; i++) {
@@ -1411,7 +1412,7 @@ static int movement_continuity(void)
     }
     printf("movement: %d monsters, max horizontal per-tick %.2f units, teleports %d\n",
            nominated, max_horizontal, jumps);
-    CHECK(jumps == 0, "%d horizontal teleports in 5 s of locomotion", jumps);
+    CHECK(jumps == 0, "%d horizontal teleports in 30 s of locomotion", jumps);
     CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
     return 0;
 }
