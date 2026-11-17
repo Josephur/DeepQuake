@@ -343,6 +343,8 @@ def set_handicap_override(reaction_ticks: int, aim_error_deg: float) -> None:
 def load_map(name: str, *, skill: int = 1, seed: int = 0) -> None:
     """Load a map, seed the game's random numbers, and spawn the player."""
     _check(_load().dqsim_load_map(name.encode("ascii"), skill, seed & 0xFFFFFFFF))
+    # A new level clears every C hook slot, so release the trampolines they held.
+    _hook_trampolines.clear()
 
 
 def step(
@@ -414,21 +416,25 @@ def ray_fan(
     return out, kinds
 
 
-_hook_trampoline = None  # keeps the ctypes callback alive
-_hook_policy = None
+# One ctypes trampoline per nominated entity, kept alive for as long as the C
+# hook slot holds its function pointer (#62). A single shared global used to be
+# overwritten on every nomination, garbage-collecting the previous trampoline
+# while its monster's C slot still pointed at it - the second monster's think
+# then called freed memory and segfaulted.
+_hook_trampolines: dict[int, ctypes.CFUNCTYPE] = {}
 
 
 def set_policy_hook(entity_index: int, policy) -> None:
     """Nominate a monster as policy-driven for the current level (#31).
 
-    ``policy`` is called once per tick with a :class:`HookObservation` and
-    returns a :class:`HookAction` (or None to keep the current facing and
+    Many monsters may be nominated at once (#62); each keeps its own callback
+    alive. ``policy`` is called once per tick with a :class:`HookObservation`
+    and returns a :class:`HookAction` (or None to keep the current facing and
     do nothing). It replaces that monster's QuakeC decisions; see the brain
     hook contract in ``dqsim.h``. The policy must not call ``sim``
     functions. Raises :class:`SimError` if the entity is not a monster or
     the loaded progs.dat is not the stock one.
     """
-    global _hook_trampoline, _hook_policy
 
     def trampoline(obs_ptr, action_ptr, _user):
         raw = obs_ptr.contents
@@ -464,17 +470,17 @@ def set_policy_hook(entity_index: int, policy) -> None:
             action_ptr.contents.side = action.side
             action_ptr.contents.attack = int(action.attack)
 
-    _hook_trampoline = _HOOK_CALLBACK(trampoline)
-    _hook_policy = policy
-    _check(_load().dqsim_set_policy_hook(entity_index, _hook_trampoline, None))
+    trampoline_cb = _HOOK_CALLBACK(trampoline)
+    _check(_load().dqsim_set_policy_hook(entity_index, trampoline_cb, None))
+    # Keep it alive only after the C side accepted the nomination; re-nominating
+    # the same entity replaces (and safely releases) its previous trampoline.
+    _hook_trampolines[entity_index] = trampoline_cb
 
 
 def clear_policy_hook() -> None:
-    """Remove the policy nomination, if any. Stock AI decides again."""
-    global _hook_trampoline, _hook_policy
+    """Remove every policy nomination. Stock AI decides again."""
     _check(_load().dqsim_clear_policy_hook())
-    _hook_trampoline = None
-    _hook_policy = None
+    _hook_trampolines.clear()
 
 
 def entities() -> list[Entity]:

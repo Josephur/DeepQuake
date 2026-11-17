@@ -163,3 +163,34 @@ print(json.dumps({"stock": stock_hash, "cleared": cleared_hash}))
     )
     out = run_in_subprocess(SCENARIO, timeout=300)
     assert out["stock"] == out["cleared"]
+
+
+MULTI_MONSTER = """
+import json
+from deepquake import sim
+sim.init()
+sim.load_map("e1m1", skill=2, seed=0)
+monsters = [e for e in sim.entities() if e.flags & sim.FL_MONSTER]
+def policy(obs):
+    return sim.HookAction(desired_yaw=obs.angles[1], forward=200.0)
+for e in monsters:
+    sim.set_policy_hook(e.index, policy)
+for _ in range(72 * 3):
+    sim.step(repeat=1)
+sim.clear_policy_hook()
+print(json.dumps({"nominated": len(monsters)}))
+"""
+
+
+@pytest.mark.gamedata
+def test_many_monsters_nominated_at_once():
+    """Two or more live nominations must not segfault (#62).
+
+    Each nomination keeps its own ctypes trampoline alive; a single shared
+    global used to be garbage-collected out from under the earlier monsters'
+    C slots, so the second think called freed memory. Stepping all of e1m1's
+    monsters at once exercises every live callback.
+    """
+    require_gamedata()
+    out = run_in_subprocess(MULTI_MONSTER, timeout=300)
+    assert out["nominated"] >= 2
