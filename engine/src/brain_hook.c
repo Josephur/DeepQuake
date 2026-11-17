@@ -33,6 +33,12 @@
 /* The longest stock stand/run chain is well under this (the Shambler stands
  * in 17 states, the Dog and Shalrath run in 12); the walk caps here. */
 #define DQ_MAX_ANIM_FRAMES 32
+/* Turning is rate-limited like the stock ai_turn/ChangeYaw instead of snapping
+ * to the policy's requested facing (#61). Snapping made the monster dart across
+ * visibility-leaf boundaries and flicker. deg/s; the policy's turn grid is at
+ * most 30 deg per 6-tick decision = 360 deg/s, so this keeps up but smooths the
+ * step into a continuous turn. */
+#define DQ_MONSTER_TURN_RATE 360.0f
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
@@ -637,10 +643,25 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
                        const dqsim_hook_observation *obs,
                        const dqsim_hook_action *action)
 {
-    ent->v.angles[YAW] = action->desired_yaw;
-    ent->v.v_angle[YAW] = action->desired_yaw;
+    /* Turn toward the requested facing at a bounded rate instead of snapping
+     * (#61): the stock ai_turn/ChangeYaw turns gradually. Snapping made the
+     * monster dart across visibility-leaf boundaries and flicker in and out.
+     * Move along the turning facing so it walks/runs where it looks. */
+    float yaw_diff = action->desired_yaw - ent->v.angles[YAW];
+    while (yaw_diff > 180.0f)
+        yaw_diff -= 360.0f;
+    while (yaw_diff < -180.0f)
+        yaw_diff += 360.0f;
+    float max_turn = DQ_MONSTER_TURN_RATE * (float)host_frametime;
+    if (yaw_diff > max_turn)
+        yaw_diff = max_turn;
+    else if (yaw_diff < -max_turn)
+        yaw_diff = -max_turn;
+    float new_yaw = ent->v.angles[YAW] + yaw_diff;
+    ent->v.angles[YAW] = new_yaw;
+    ent->v.v_angle[YAW] = new_yaw;
 
-    vec3_t angles = {0, action->desired_yaw, 0}, forward, right, up, wish;
+    vec3_t angles = {0, new_yaw, 0}, forward, right, up, wish;
     AngleVectors(angles, forward, right, up);
     wish[0] = forward[0] * action->forward + right[0] * action->side;
     wish[1] = forward[1] * action->forward + right[1] * action->side;
