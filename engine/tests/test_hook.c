@@ -491,10 +491,10 @@ static int dog_bite(void)
     return 0;
 }
 
-/* The bite is a lunge - dog_atta1 starts dog_atta2..8, every frame moving
- * at the player - so from 300 units the dog closes the distance and then
- * bites. What it must not do is damage anybody it is not actually next to:
- * the first damage has to land at contact range. */
+/* Asked to attack a player 300 units away, the dog closes the distance and
+ * then bites (since #63 by charging and leaping; before, by the bite chain's
+ * own lunge steps). What it must not do is damage anybody it is not actually
+ * next to: the first damage has to land at contact range. */
 static int dog_range(void)
 {
     dqsim_player_state player;
@@ -1430,16 +1430,6 @@ static int movement_continuity(void)
     return 0;
 }
 
-static float angle_between(float a, float b)
-{
-    float d = fmodf(a - b, 360.0f);
-    if (d > 180.0f)
-        d -= 360.0f;
-    if (d < -180.0f)
-        d += 360.0f;
-    return fabsf(d);
-}
-
 static int driven_entity(int index, dqsim_entity *out)
 {
     static dqsim_entity entities[2048];
@@ -1450,6 +1440,94 @@ static int driven_entity(int index, dqsim_entity *out)
             return 1;
         }
     return 0;
+}
+
+/* A melee attack is never started out of reach (#63). A policy that asks to
+ * attack a player it can see but not reach used to get the whole bite or
+ * swing played where the monster stood, again and again: Dogs and Fiends
+ * attacking thin air. Now the monster charges - runs at the player, leaps if
+ * its class has a leap - and the blow starts in reach. Checked on what a
+ * client sees: while the player is beyond the leap window the monster shows
+ * its run frames [run_lo, run_hi] and covers ground, and the first damage
+ * lands at contact range. */
+static int melee_needs_reach(const char *map, const char *classname, float from, int run_lo,
+                             int run_hi)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+    dqsim_entity self;
+    int index;
+    if (driven_start(map, classname, &index))
+        return 1;
+    /* No reaction delay: the charge is what is measured, from the first tick. */
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "handicap override: %s",
+          dqsim_last_error());
+    /* A spot `from` units away that is in sight and level with the monster
+     * once the player has landed: one over a drop falls out of sight, and
+     * that is not the case under test. The monster idles meanwhile. */
+    int placed = 0;
+    for (int k = 0; k < 24 && !placed; k++) {
+        if (!place_player_ahead(driven_origin, driven_yaw + (float)(k * 15), from))
+            continue;
+        driven_mode = 0;
+        CHECK(dqsim_step_repeat(&idle, 36) == DQSIM_OK, "let the player land");
+        driven_saw_player = 0;
+        CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "look");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player at range");
+        CHECK(driven_entity(index, &self), "the %s is gone", classname);
+        placed = driven_saw_player && fabsf(player.origin[2] - self.origin[2]) < 48.0f &&
+                 flat_distance(self.origin, player.origin) > from - 40.0f;
+    }
+    CHECK(placed, "no level spot in the %s's sight %.0f units away", classname, from);
+
+    float health = player.health;
+    float start = flat_distance(self.origin, player.origin);
+    float first_damage_distance = -1.0f;
+    int far_ticks = 0, far_running = 0, reached_tick = -1;
+    driven_mode = 3;
+    for (int tick = 0; tick < 72 * 6 && first_damage_distance < 0.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "charge steps");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the charge");
+        CHECK(driven_entity(index, &self), "the %s is gone", classname);
+        float now = flat_distance(self.origin, player.origin);
+        if (now > 220.0f) {
+            far_ticks++;
+            if (self.frame >= run_lo && self.frame <= run_hi)
+                far_running++;
+            else
+                CHECK(far_ticks <= 12 || far_running * 10 >= far_ticks * 9,
+                      "%s at %.0f units shows frame %d: not running at the player", classname,
+                      now, self.frame);
+        } else if (reached_tick < 0) {
+            reached_tick = tick;
+        }
+        if (player.health < health - 0.5f)
+            first_damage_distance = now;
+    }
+    printf("%s: from %.0f units, %d of %d far ticks in run frames, inside 220 units after "
+           "%.2f s, first damage at %.0f units\n",
+           classname, start, far_running, far_ticks, reached_tick / 72.0f, first_damage_distance);
+    CHECK(far_ticks >= 10, "the %s started only %.0f units away", classname, start);
+    CHECK(far_running * 10 >= far_ticks * 9, "the %s ran on only %d of %d ticks out of reach",
+          classname, far_running, far_ticks);
+    CHECK(reached_tick >= 0 && reached_tick <= 72 * 2,
+          "the %s took %.2f s to come within 220 units from %.0f", classname,
+          reached_tick / 72.0f, start);
+    CHECK(first_damage_distance >= 0.0f, "the %s never damaged the player", classname);
+    CHECK(first_damage_distance < 110.0f, "the %s's first damage landed %.0f units away",
+          classname, first_damage_distance);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+static float angle_between(float a, float b)
+{
+    float d = fmodf(a - b, 360.0f);
+    if (d > 180.0f)
+        d -= 360.0f;
+    if (d < -180.0f)
+        d += 360.0f;
+    return fabsf(d);
 }
 
 /* What a client is shown must match what the body does (#61). The policy
@@ -1573,7 +1651,10 @@ int main(int argc, char **argv)
         shalrath_aim_error() || knight_drive() || knight_attack() || fiend_drive() ||
         fiend_attack() || fiend_leap() || shambler_drive() || shambler_claw() ||
         shambler_beam() || shambler_aim_error() || animation_frames() ||
-        movement_continuity() || shown_facing())
+        movement_continuity() || shown_facing() ||
+        melee_needs_reach("e1m1", "monster_dog", 350.0f, 48, 59) ||
+        melee_needs_reach("e2m5", "monster_demon1", 350.0f, 21, 26) ||
+        melee_needs_reach("e1m4", "monster_knight", 350.0f, 9, 16))
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

@@ -193,6 +193,22 @@ attack action with a visible player and QuakeC's `attack_finished`
 expired starts the monster's real QuakeC attack sequence, and attack,
 pain and death sequences always run under QuakeC.
 
+**Melee needs reach (#63).** Each attack entry is classed as ranged (its
+state chain, or a chain a dispatcher such as `ogre_melee` can start,
+reaches a projectile or the Shambler's `CastLightning`) or melee
+(everything else). A ranged entry starts at any distance. A melee entry
+starts only when the player is within reach: flat distance at most the
+monster's half width plus 48 units (64 for a Grunt-sized monster, 80 for
+an Ogre-sized one) and no more than 64 units above or below. Asked to
+attack a visible player that a melee entry cannot reach, the monster
+*charges* instead: the engine's own chase step (`SV_MoveToGoal`, the one
+stock monsters run at their enemy with) at 320 units a second, and a
+class whose spawn `th_missile` is a leap (the Dog's `dog_leap1`, the
+Fiend's `demon1_jump1`) leaps when the player is 100 to 200 units away.
+The policy still decides *when* to engage; how a melee monster crosses
+the gap once it has is the stock rule, not learned. This supersedes the
+"lunge across a room" behaviour described below.
+
 **The attack entry (#47).** The entry is the first frame of the class's
 attack animation, the function the spawn built-in assigns to the monster's
 `th_melee` field and the stock AI runs when it decides to attack: the

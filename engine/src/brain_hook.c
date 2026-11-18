@@ -72,6 +72,27 @@
 /* The monster counts as moving when it covered at least this fraction of the
  * step it was asked for; a step into a wall covers none of it. */
 #define DQ_MOVED_FRACTION 0.25f
+/* A melee attack - any attack that is not a projectile or a beam - starts
+ * only when the enemy is within reach (#63). Asked to attack an enemy it can
+ * see but not reach, the monster charges: it turns to the enemy and runs at
+ * it, and a class with a leap leaps when the stock AI would. Without this a
+ * Dog, Fiend or Knight played its whole bite or swing where it stood, again
+ * and again, at any distance.
+ *
+ * Reach is flat distance between origins: the monster's half width, the
+ * player's (16), and 32 more for the step the stock attack states take toward
+ * the enemy before the blow lands. That is 64 for a Grunt-sized monster and 80
+ * for an Ogre-sized one, whose corner-to-corner contact distance is already
+ * 68. The height limit keeps a monster from swinging at a player on a ledge
+ * above it. The leap window is the stock one: CheckDogJump leaps between 80
+ * and 150 units, CheckDemonJump between 100 and 200. The charge runs at about
+ * a stock Dog's or Fiend's top running speed (ai_run 32 to 36 units per 0.1 s
+ * think), in units per second. */
+#define DQ_MELEE_REACH_MARGIN 48.0f
+#define DQ_MELEE_REACH_HEIGHT 64.0f
+#define DQ_LEAP_MIN 100.0f
+#define DQ_LEAP_MAX 200.0f
+#define DQ_CHARGE_SPEED 320.0f
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
@@ -91,6 +112,14 @@ typedef struct dq_hook_slot {
      * is a pounce, and one entry execution per decision cannot charge with
      * it. 0 = the class sets none. */
     func_t melee_think, missile_think;
+    /* Does each entry hit from a distance - a projectile, a beam (#63)? One
+     * that does not is a melee attack, and a melee attack out of reach is
+     * never started: the monster charges instead. */
+    int melee_ranged, missile_ranged;
+    /* The class's leap, if it has one: a spawn th_missile that fires nothing
+     * (the Dog's "dog_leap1", the Fiend's "demon1_jump1"). The charge uses it
+     * the way the stock AI does, to cross the last stretch. 0 = none. */
+    func_t leap_think;
     /* The stand and run animations as the stock QuakeC actually plays them:
      * the frame of each state in the chain, in order (#61). Cycling these
      * sequences - rather than offsetting from the first frame - keeps every
@@ -396,10 +425,12 @@ static func_t find_function(const char *name)
  * grenade launch is "OgreFireGrenade", which contains "Fire" without ending
  * in it (#53); "SUB_CheckRefire" is not a shot, and the engine's own helpers
  * that merely share the syllable (the doors' "door_fire") are not reached
- * from a monster's attack chain. */
+ * from a monster's attack chain. The Shambler's beam is "CastLightning" (#63):
+ * without it the beam chain counted as firing nothing, the Shambler's ranged
+ * entry was dropped, and it only ever clawed. */
 static int is_shot_function(const char *name)
 {
-    static const char *const shots[] = {"fire", "shot", "missile"};
+    static const char *const shots[] = {"fire", "shot", "missile", "lightning"};
     if (strncmp(name, "SUB_", 4) == 0)
         return 0;
     for (const char *c = name; *c; c++)
@@ -491,6 +522,36 @@ static int chain_reaches_shot(func_t entry)
             visited[visited_count++] = f;
         if (chain_has_shot_call(f))
             return 1;
+    }
+    return 0;
+}
+
+/* Does this attack entry hit from a distance? Its own state chain reaches a
+ * shot, or it is a dispatcher - a plain function that picks among chains,
+ * like the Scrag's "Wiz_Missile" or the Ogre's "ogre_melee" - and a chain it
+ * can start does. */
+static int entry_is_ranged(func_t entry, int depth)
+{
+    if (!entry)
+        return 0;
+    if (chain_reaches_shot(entry))
+        return 1;
+    dfunction_t *function = &pr_functions[entry];
+    if (function->first_statement <= 0 || depth >= 2)
+        return 0;
+    for (int s = 0; s < 512; s++) {
+        dstatement_t *statement = &pr_statements[function->first_statement + s];
+        if (statement->op == OP_DONE || statement->op == OP_RETURN)
+            break;
+        if (statement->op == OP_STATE)
+            return 0; /* a state function: its chain was walked above */
+        if (statement->op >= OP_CALL0 && statement->op <= OP_CALL8) {
+            func_t called;
+            memcpy(&called, &pr_globals[statement->a], sizeof(called));
+            if (called > 0 && called < progs->numfunctions &&
+                pr_functions[called].first_statement > 0 && entry_is_ranged(called, depth + 1))
+                return 1;
+        }
     }
     return 0;
 }
@@ -697,26 +758,104 @@ static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation 
     }
 }
 
+/* The attack entry the monster may start on this enemy now, 0 when its
+ * attack from here would be a melee attack out of reach. */
+static func_t attack_for(const edict_t *ent, const dq_hook_slot *slot, const edict_t *enemy)
+{
+    float dx = enemy->v.origin[0] - ent->v.origin[0];
+    float dy = enemy->v.origin[1] - ent->v.origin[1];
+    float distance = sqrtf(dx * dx + dy * dy);
+    int in_reach = distance <= ent->v.maxs[0] + DQ_MELEE_REACH_MARGIN &&
+                   fabsf(enemy->v.origin[2] - ent->v.origin[2]) <= DQ_MELEE_REACH_HEIGHT;
+    if (in_reach && slot->melee_think)
+        return slot->melee_think;
+    if (slot->missile_think)
+        return slot->missile_ranged || in_reach ? slot->missile_think : 0;
+    if (slot->melee_think)
+        return slot->melee_ranged || in_reach ? slot->melee_think : 0;
+    return slot->attack_think;
+}
+
 static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
                        const dqsim_hook_observation *obs,
                        const dqsim_hook_action *action)
 {
+    /* The enemy an attack would be at: the nearest client in sight. */
+    edict_t *enemy = NULL;
+    if (action->attack)
+        for (int i = 0; i < obs->visible_count; i++)
+            if (obs->visible[i].flags & FL_CLIENT) {
+                enemy = EDICT_NUM(obs->visible[i].index);
+                break;
+            }
+    eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
+    int ready = !cooldown || sv.time >= cooldown->_float;
+
+    /* A melee attack asked for out of reach becomes a charge (see
+     * DQ_MELEE_REACH_MARGIN): run at the enemy, or leap the last stretch. */
+    float want_yaw = action->desired_yaw, want_forward = action->forward,
+          want_side = action->side;
+    func_t leap = 0;
+    int charging = enemy && !attack_for(ent, slot, enemy);
+    if (charging) {
+        float dx = enemy->v.origin[0] - ent->v.origin[0];
+        float dy = enemy->v.origin[1] - ent->v.origin[1];
+        float distance = sqrtf(dx * dx + dy * dy);
+        want_yaw = atan2f(dy, dx) * 180.0f / 3.14159265f;
+        want_forward = DQ_CHARGE_SPEED;
+        want_side = 0;
+        if (slot->leap_think && ready && ((int)ent->v.flags & FL_ONGROUND) &&
+            distance >= DQ_LEAP_MIN && distance <= DQ_LEAP_MAX &&
+            fabsf(enemy->v.origin[2] - ent->v.origin[2]) <= DQ_MELEE_REACH_HEIGHT)
+            leap = slot->leap_think;
+    }
+
     /* Turn the policy's facing toward the one it asked for at a bounded rate
      * instead of snapping (#61): the stock ai_turn/ChangeYaw turns gradually.
-     * Moves are measured from the turning facing. */
-    float new_yaw = turn_toward(policy_yaw(ent), action->desired_yaw,
-                                DQ_MONSTER_TURN_RATE * (float)host_frametime);
+     * Moves are measured from the turning facing. A leap goes where the
+     * monster faces, so it faces the enemy outright and does not step. */
+    float new_yaw = leap ? want_yaw
+                         : turn_toward(policy_yaw(ent), want_yaw,
+                                       DQ_MONSTER_TURN_RATE * (float)host_frametime);
+    /* On the ground the charge is the engine's own chase step, the one every
+     * stock monster runs at its enemy with: it turns the body, steps, and
+     * picks a way round what is in the way, where a straight line stops dead
+     * at the first crate. It turns by yaw_speed per call and the stock states
+     * call it ten times a second, so for this per-tick call the turn is
+     * scaled to the hook's own turn rate. The body's facing is the policy's
+     * for as long as the charge lasts. */
+    int chased = 0, chase_moved = 0;
+    if (charging && !leap && ((int)ent->v.flags & FL_ONGROUND)) {
+        vec3_t before;
+        float yaw_speed = ent->v.yaw_speed;
+        VectorCopy(ent->v.origin, before);
+        ent->v.angles[YAW] = policy_yaw(ent);
+        ent->v.enemy = EDICT_TO_PROG(enemy);
+        ent->v.goalentity = EDICT_TO_PROG(enemy);
+        ent->v.yaw_speed = DQ_MONSTER_TURN_RATE * (float)host_frametime;
+        pr_global_struct->self = EDICT_TO_PROG(ent);
+        G_FLOAT(OFS_PARM0) = DQ_CHARGE_SPEED * (float)host_frametime;
+        SV_MoveToGoal();
+        ent->v.yaw_speed = yaw_speed;
+        float dx = ent->v.origin[0] - before[0], dy = ent->v.origin[1] - before[1];
+        float asked = DQ_CHARGE_SPEED * (float)host_frametime * DQ_MOVED_FRACTION;
+        chase_moved = dx * dx + dy * dy >= asked * asked;
+        chased = 1;
+        new_yaw = ent->v.angles[YAW];
+    }
     ent->v.v_angle[YAW] = new_yaw;
 
     vec3_t angles = {0, new_yaw, 0}, forward, right, up, wish;
     AngleVectors(angles, forward, right, up);
-    wish[0] = forward[0] * action->forward + right[0] * action->side;
-    wish[1] = forward[1] * action->forward + right[1] * action->side;
+    wish[0] = forward[0] * want_forward + right[0] * want_side;
+    wish[1] = forward[1] * want_forward + right[1] * want_side;
     wish[2] = 0;
+    if (leap || chased)
+        wish[0] = wish[1] = 0;
     float speed = sqrtf(wish[0] * wish[0] + wish[1] * wish[1]);
     /* What the body actually did this tick: the direction it travelled, or
      * nothing when the step was refused (a wall, a ledge, another monster). */
-    int moved = 0;
+    int moved = chase_moved;
     float travel_yaw = new_yaw;
     if (speed > 0.01f) {
         if ((int)ent->v.flags & FL_ONGROUND) {
@@ -739,41 +878,20 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
     }
     /* The shown facing follows the travel, or settles on the policy's facing
      * when the monster is not going anywhere. */
-    ent->v.angles[YAW] = turn_toward(ent->v.angles[YAW], moved ? travel_yaw : new_yaw,
-                                     DQ_SHOWN_TURN_RATE * (float)host_frametime);
+    if (!chased)
+        ent->v.angles[YAW] = turn_toward(ent->v.angles[YAW], moved ? travel_yaw : new_yaw,
+                                         DQ_SHOWN_TURN_RATE * (float)host_frametime);
     ent->v.v_angle[PITCH] = ent->v.angles[YAW];
 
     int attacked = 0;
-    if (action->attack) {
-        edict_t *enemy = NULL;
-        for (int i = 0; i < obs->visible_count; i++) {
-            if (obs->visible[i].flags & FL_CLIENT) {
-                enemy = EDICT_NUM(obs->visible[i].index);
-                break;
-            }
-        }
+    if (enemy) {
         /* The stock AI runs the spawn's own th_melee when the enemy is in
-         * melee range (QuakeC's RANGE_MELEE is 64) and th_missile otherwise;
-         * a class without one entry falls back to the other, and a class
-         * with neither uses the shape probe (#53). For the Grunt, the Dog
-         * and the Enforcer this picks the same function the shape probe
-         * always did: their spawns set exactly one entry. */
-        func_t attack = 0;
-        if (enemy) {
-            float dx = enemy->v.origin[0] - ent->v.origin[0];
-            float dy = enemy->v.origin[1] - ent->v.origin[1];
-            float distance = sqrtf(dx * dx + dy * dy);
-            if (distance <= 64.0f && slot->melee_think)
-                attack = slot->melee_think;
-            else if (slot->missile_think)
-                attack = slot->missile_think;
-            else if (slot->melee_think)
-                attack = slot->melee_think;
-            else
-                attack = slot->attack_think;
-        }
-        eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
-        if (attack && (!cooldown || sv.time >= cooldown->_float)) {
+         * melee reach and th_missile otherwise; a class without one entry
+         * falls back to the other, and a class with neither uses the shape
+         * probe (#53). An entry that is a melee attack is not started out of
+         * reach (#63): the monster charged above instead, or leaps now. */
+        func_t attack = leap ? leap : attack_for(ent, slot, enemy);
+        if (attack && ready) {
             int reaction_ticks;
             float aim_error_deg;
             effective_handicap(slot, &reaction_ticks, &aim_error_deg);
@@ -1094,6 +1212,12 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
     slot->missile_think = missile && chain_reaches_shot(missile) ? missile : probe;
     if (!melee && !missile)
         slot->melee_think = probe; /* no spawn entries: the probe's guess everywhere */
+    slot->melee_ranged = entry_is_ranged(slot->melee_think, 0);
+    slot->missile_ranged = entry_is_ranged(slot->missile_think, 0);
+    /* A leap is a state chain of the class's own; a dispatcher the ranged
+     * rule could not follow (the Scrag's) is not one. */
+    slot->leap_think =
+        missile && state_frame(missile) >= 0.0f && !entry_is_ranged(missile, 0) ? missile : 0;
     slot->fire_count = find_fire_thinks(slot, slot->fire_thinks, DQ_MAX_FIRE_THINKS);
     return NULL;
 }
