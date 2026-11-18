@@ -92,6 +92,7 @@ class _Entity(ctypes.Structure):
         ("flags", ctypes.c_int32),
         ("frame", ctypes.c_int32),
         ("lerp_interval", ctypes.c_int32),
+        ("yaw", ctypes.c_float),
     ]
 
 
@@ -196,6 +197,7 @@ class Entity:
     frame: int = 0  # model animation frame the entity is showing (#61)
     # Interpolation interval sent to a client, in 1/255 s; -1 = none sent (#61)
     lerp_interval: int = -1
+    yaw: float = 0.0  # facing shown to clients, degrees (#61)
 
 
 @dataclass(frozen=True)
@@ -510,6 +512,7 @@ def entities() -> list[Entity]:
             flags=e.flags,
             frame=e.frame,
             lerp_interval=e.lerp_interval,
+            yaw=e.yaw,
         )
         for e in buffer[:count]
     ]

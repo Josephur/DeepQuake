@@ -235,7 +235,7 @@ static uint64_t multi_scenario(void)
  *
  * The same machinery drives any stock class (#49): the state below belongs to
  * "the monster under test", whatever its class. */
-static int driven_mode; /* 0 idle, 1 forward, 2 turn, 3 attack the player */
+static int driven_mode; /* 0 idle, 1 forward, 2 turn, 3 attack the player, 4 strafe */
 
 /* The end-state hashes of the clean and the 45-degree-error throw windows:
  * the windows run on the same seed and the same inputs, so the hashes differ
@@ -248,6 +248,7 @@ static int driven_saw_player;
 static float driven_yaw;
 static float driven_origin[3];
 static float driven_turn_to;
+static float driven_side;
 
 static void driven_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action,
                           void *user)
@@ -263,6 +264,8 @@ static void driven_policy(const dqsim_hook_observation *obs, dqsim_hook_action *
     action->desired_yaw = obs->angles[1];
     if (driven_mode == 1) {
         action->forward = 200.0f;
+    } else if (driven_mode == 4) {
+        action->side = driven_side;
     } else if (driven_mode == 2) {
         action->desired_yaw = driven_turn_to;
     } else if (driven_mode == 3) {
@@ -1427,6 +1430,105 @@ static int movement_continuity(void)
     return 0;
 }
 
+static float angle_between(float a, float b)
+{
+    float d = fmodf(a - b, 360.0f);
+    if (d > 180.0f)
+        d -= 360.0f;
+    if (d < -180.0f)
+        d += 360.0f;
+    return fabsf(d);
+}
+
+static int driven_entity(int index, dqsim_entity *out)
+{
+    static dqsim_entity entities[2048];
+    int count = dqsim_get_entities(entities, 2048);
+    for (int i = 0; i < count; i++)
+        if (entities[i].index == index) {
+            *out = entities[i];
+            return 1;
+        }
+    return 0;
+}
+
+/* What a client is shown must match what the body does (#61). The policy
+ * strafes and backs up, but a monster model only has run-forward frames:
+ * showing the policy's facing made Grunts run with their backs to where they
+ * were going, and the run animation played whenever a move was asked for, so
+ * a Grunt held by a wall ran on the spot. The shown facing follows the real
+ * travel while the facing the policy steers by is untouched, and the run
+ * frames play only on ticks the monster really moved. The Grunt stands in
+ * frames 0-7 and runs in 73-80. */
+static int shown_facing(void)
+{
+    const dqsim_action idle = {0};
+    dqsim_entity self;
+    int index;
+    if (driven_start("e1m1", "monster_army", &index))
+        return 1;
+
+    /* Strafing: whichever side is open. */
+    float policy_yaw = driven_yaw;
+    float moved = 0.0f, travel = 0.0f;
+    for (int attempt = 0; attempt < 2 && moved < 60.0f; attempt++) {
+        float start[3];
+        memcpy(start, driven_origin, sizeof(start));
+        driven_side = attempt == 0 ? 200.0f : -200.0f;
+        driven_mode = 4;
+        CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "strafe");
+        float dx = driven_origin[0] - start[0], dy = driven_origin[1] - start[1];
+        moved = sqrtf(dx * dx + dy * dy);
+        travel = atan2f(dy, dx) * 180.0f / 3.14159265f;
+    }
+    CHECK(moved >= 60.0f, "the Grunt strafed only %.1f units either way", moved);
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(angle_between(driven_yaw, policy_yaw) < 0.01f,
+          "strafing turned the policy's facing from %.1f to %.1f", policy_yaw, driven_yaw);
+    CHECK(angle_between(travel, policy_yaw) > 60.0f,
+          "the strafe travelled along the policy's facing: nothing to tell apart");
+    CHECK(angle_between(self.yaw, travel) < 10.0f,
+          "strafing toward %.1f, the Grunt is shown facing %.1f", travel, self.yaw);
+    CHECK(self.frame >= 73 && self.frame <= 80, "strafing Grunt shows frame %d, not a run frame",
+          self.frame);
+
+    /* Standing still again, the shown facing settles back on the policy's. */
+    driven_mode = 0;
+    CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "settle");
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(angle_between(self.yaw, policy_yaw) < 0.01f,
+          "at rest the Grunt is shown facing %.1f, the policy faces %.1f", self.yaw, policy_yaw);
+
+    /* Forward until something holds it: run frames while it covers ground,
+     * stand frames on every tick it does not. */
+    driven_mode = 1;
+    float last[3];
+    memcpy(last, self.origin, sizeof(last));
+    int held = 0, ran = 0;
+    for (int t = 0; t < 4000 && held < 72; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "forward tick");
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        float dx = self.origin[0] - last[0], dy = self.origin[1] - last[1];
+        float step = sqrtf(dx * dx + dy * dy);
+        memcpy(last, self.origin, sizeof(last));
+        if (step == 0.0f) {
+            held++;
+            CHECK(self.frame <= 7, "tick %d: held in place but showing run frame %d", t,
+                  self.frame);
+        } else if (step > 2.0f) {
+            ran++;
+            CHECK(self.frame >= 73 && self.frame <= 80,
+                  "tick %d: moved %.2f units but showing frame %d", t, step, self.frame);
+        }
+    }
+    CHECK(ran > 20, "the Grunt ran on only %d ticks", ran);
+    CHECK(held >= 72, "nothing held the Grunt in 4000 ticks (%d held ticks)", held);
+    printf("grunt: shown facing follows travel; %d run ticks, %d held ticks in stand frames\n",
+           ran, held);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1471,7 +1573,7 @@ int main(int argc, char **argv)
         shalrath_aim_error() || knight_drive() || knight_attack() || fiend_drive() ||
         fiend_attack() || fiend_leap() || shambler_drive() || shambler_claw() ||
         shambler_beam() || shambler_aim_error() || animation_frames() ||
-        movement_continuity())
+        movement_continuity() || shown_facing())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

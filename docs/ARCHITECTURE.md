@@ -177,8 +177,18 @@ fan with surface kinds from its eye; the entities it has line of sight
 to, nearest first) and returns an action: absolute facing, forward/side
 speeds, and an attack flag. Movement is applied as ground steps or air
 velocity at that same point in the tick and the decision think is
-rescheduled one tick later, so the policy decides every tick; the
-animation frames come from the QuakeC state functions' own frames. An
+rescheduled one tick later (a few milliseconds past it: a think due
+exactly on the next tick makes the server send clients a zero
+interpolation interval, which the client divides by), so the policy
+decides every tick; the animation frames come from the QuakeC state
+functions' own frames, the run frames only on ticks the monster really
+moved. A driven monster has two facings: the policy's, which its
+observation is taken in and its moves are measured from, and the one
+shown to clients, which follows the direction the body actually travels
+(the policy strafes and backs up; a monster model only runs forward) and
+settles on the policy's facing at rest. Both are kept in the edict
+(`v_angle[YAW]` and `angles[YAW]`), so snapshots and the state hash
+carry them, and the stock attack states start from the policy's. An
 attack action with a visible player and QuakeC's `attack_finished`
 expired starts the monster's real QuakeC attack sequence, and attack,
 pain and death sequences always run under QuakeC.

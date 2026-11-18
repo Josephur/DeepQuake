@@ -53,6 +53,25 @@
  * is capped at half a tick so the think still runs on the very next tick
  * (SV_RunThink runs a think that is due before the end of the tick). */
 #define DQ_THINK_MARGIN 0.006
+/* A driven monster has two facings (#61). The policy's facing is the frame
+ * its observation is taken in and its forward/side moves are measured from;
+ * the policy strafes and backs up freely, as a player does. A Quake monster
+ * model has only run-forward frames, so showing the policy's facing made the
+ * monster run with its back to where it was going, or slide sideways. The
+ * facing shown to clients therefore follows what the body actually does: the
+ * direction it really moved this tick, or the policy's facing when it did not
+ * move. Both live in the edict, so snapshots and the state hash carry them
+ * with no extra state: angles[YAW] is the shown facing (what clients draw and
+ * the stock attack states turn), v_angle[YAW] the policy's facing and
+ * v_angle[PITCH] the shown facing as the hook last wrote it. Stock QuakeC
+ * never reads a monster's v_angle. When angles[YAW] is no longer what the hook
+ * wrote, QuakeC turned the monster (an attack's ai_face) and the policy's
+ * facing adopts the result. deg/s; twice the policy's own turn rate, so the
+ * body visibly leads into a change of direction rather than snapping. */
+#define DQ_SHOWN_TURN_RATE 720.0f
+/* The monster counts as moving when it covered at least this fraction of the
+ * step it was asked for; a step into a wall covers none of it. */
+#define DQ_MOVED_FRACTION 0.25f
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
@@ -577,6 +596,30 @@ static int is_decision_think(func_t fnum, dq_hook_slot *slot)
     return 1;
 }
 
+/* Turn `from` toward `to` by at most `max_turn` degrees, the short way. */
+static float turn_toward(float from, float to, float max_turn)
+{
+    float diff = to - from;
+    while (diff > 180.0f)
+        diff -= 360.0f;
+    while (diff < -180.0f)
+        diff += 360.0f;
+    if (diff > max_turn)
+        diff = max_turn;
+    else if (diff < -max_turn)
+        diff = -max_turn;
+    return from + diff;
+}
+
+/* The policy's facing (see DQ_SHOWN_TURN_RATE): its own, unless QuakeC has
+ * turned the monster since the hook last wrote the shown facing. */
+static float policy_yaw(edict_t *ent)
+{
+    if (ent->v.angles[YAW] != ent->v.v_angle[PITCH])
+        ent->v.v_angle[YAW] = ent->v.angles[YAW];
+    return ent->v.v_angle[YAW];
+}
+
 static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation *obs)
 {
     static const float pitches[DQSIM_HOOK_RAY_PITCHES] = {0.0f, 30.0f};
@@ -586,6 +629,7 @@ static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation 
     VectorCopy(ent->v.origin, obs->origin);
     VectorCopy(ent->v.velocity, obs->velocity);
     VectorCopy(ent->v.angles, obs->angles);
+    obs->angles[YAW] = policy_yaw(ent);
     obs->health = ent->v.health;
     obs->on_ground = ((int)ent->v.flags & FL_ONGROUND) != 0;
     obs->waterlevel = (int)ent->v.waterlevel;
@@ -600,7 +644,7 @@ static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation 
         for (int y = 0; y < DQSIM_HOOK_RAY_YAWS; y++) {
             vec3_t angles, forward, right, up, end;
             angles[PITCH] = pitches[p];
-            angles[YAW] = ent->v.angles[YAW] + 360.0f * (float)y / DQSIM_HOOK_RAY_YAWS;
+            angles[YAW] = obs->angles[YAW] + 360.0f * (float)y / DQSIM_HOOK_RAY_YAWS;
             angles[ROLL] = 0;
             AngleVectors(angles, forward, right, up);
             VectorMA(eye, DQSIM_HOOK_RAY_DISTANCE, forward, end);
@@ -657,22 +701,11 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
                        const dqsim_hook_observation *obs,
                        const dqsim_hook_action *action)
 {
-    /* Turn toward the requested facing at a bounded rate instead of snapping
-     * (#61): the stock ai_turn/ChangeYaw turns gradually. Snapping made the
-     * monster dart across visibility-leaf boundaries and flicker in and out.
-     * Move along the turning facing so it walks/runs where it looks. */
-    float yaw_diff = action->desired_yaw - ent->v.angles[YAW];
-    while (yaw_diff > 180.0f)
-        yaw_diff -= 360.0f;
-    while (yaw_diff < -180.0f)
-        yaw_diff += 360.0f;
-    float max_turn = DQ_MONSTER_TURN_RATE * (float)host_frametime;
-    if (yaw_diff > max_turn)
-        yaw_diff = max_turn;
-    else if (yaw_diff < -max_turn)
-        yaw_diff = -max_turn;
-    float new_yaw = ent->v.angles[YAW] + yaw_diff;
-    ent->v.angles[YAW] = new_yaw;
+    /* Turn the policy's facing toward the one it asked for at a bounded rate
+     * instead of snapping (#61): the stock ai_turn/ChangeYaw turns gradually.
+     * Moves are measured from the turning facing. */
+    float new_yaw = turn_toward(policy_yaw(ent), action->desired_yaw,
+                                DQ_MONSTER_TURN_RATE * (float)host_frametime);
     ent->v.v_angle[YAW] = new_yaw;
 
     vec3_t angles = {0, new_yaw, 0}, forward, right, up, wish;
@@ -681,16 +714,34 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
     wish[1] = forward[1] * action->forward + right[1] * action->side;
     wish[2] = 0;
     float speed = sqrtf(wish[0] * wish[0] + wish[1] * wish[1]);
+    /* What the body actually did this tick: the direction it travelled, or
+     * nothing when the step was refused (a wall, a ledge, another monster). */
+    int moved = 0;
+    float travel_yaw = new_yaw;
     if (speed > 0.01f) {
         if ((int)ent->v.flags & FL_ONGROUND) {
-            vec3_t move;
+            vec3_t move, before;
             VectorScale(wish, (float)host_frametime, move);
+            VectorCopy(ent->v.origin, before);
             SV_movestep(ent, move, true);
+            float dx = ent->v.origin[0] - before[0], dy = ent->v.origin[1] - before[1];
+            float asked = speed * (float)host_frametime * DQ_MOVED_FRACTION;
+            if (dx * dx + dy * dy >= asked * asked) {
+                moved = 1;
+                travel_yaw = atan2f(dy, dx) * 180.0f / 3.14159265f;
+            }
         } else {
             ent->v.velocity[0] = wish[0];
             ent->v.velocity[1] = wish[1];
+            moved = 1;
+            travel_yaw = atan2f(wish[1], wish[0]) * 180.0f / 3.14159265f;
         }
     }
+    /* The shown facing follows the travel, or settles on the policy's facing
+     * when the monster is not going anywhere. */
+    ent->v.angles[YAW] = turn_toward(ent->v.angles[YAW], moved ? travel_yaw : new_yaw,
+                                     DQ_SHOWN_TURN_RATE * (float)host_frametime);
+    ent->v.v_angle[PITCH] = ent->v.angles[YAW];
 
     int attacked = 0;
     if (action->attack) {
@@ -728,6 +779,9 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
             effective_handicap(slot, &reaction_ticks, &aim_error_deg);
             (void)reaction_ticks;
             dq_handicap_roll_aim(&slot->handicap, aim_error_deg);
+            /* The stock attack states turn and aim from the monster's facing:
+             * they start from the policy's, as they always have. */
+            ent->v.angles[YAW] = new_yaw;
             ent->v.enemy = EDICT_TO_PROG(enemy);
             pr_global_struct->self = EDICT_TO_PROG(ent);
             pr_global_struct->other = EDICT_TO_PROG(enemy);
@@ -754,11 +808,13 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
     }
 
     if (!attacked) {
-        /* Animate from the state functions' own frames: run while moving,
-         * stand while still, advancing at the QuakeC think cadence. */
+        /* Animate from the state functions' own frames: run while really
+         * moving, stand while still or held by a wall (running on the spot is
+         * what a refused step used to look like), advancing at the QuakeC
+         * think cadence. */
         slot->anim_tick++;
         unsigned step = slot->anim_tick / 7;
-        if (speed > 0.01f && slot->run_len > 0)
+        if (moved && slot->run_len > 0)
             ent->v.frame = slot->run_seq[step % (unsigned)slot->run_len];
         else if (slot->stand_len > 0)
             ent->v.frame = slot->stand_seq[step % (unsigned)slot->stand_len];
@@ -871,14 +927,14 @@ void dqsim_hook_execute_program(func_t fnum)
                                                       reaction_ticks, host_frametime);
                 dqsim_hook_action action;
                 memset(&action, 0, sizeof(action));
-                action.desired_yaw = ent->v.angles[YAW];
+                action.desired_yaw = obs.angles[YAW];
                 slot->callback(&obs, &action, slot->user);
                 if (!ent->free) {
                     if (!respond) {
                         /* Inside the reaction delay: the callback ran,
                          * but nothing is applied (no turn, move or attack). */
                         memset(&action, 0, sizeof(action));
-                        action.desired_yaw = ent->v.angles[YAW];
+                        action.desired_yaw = obs.angles[YAW];
                     }
                     hook_apply(ent, fnum, slot, &obs, &action);
                 }

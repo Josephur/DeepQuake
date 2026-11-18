@@ -89,6 +89,10 @@ typedef struct dqsim_entity {
      * in 1/255 s, or -1 when it sends none (the client then assumes 0.1 s).
      * Never 0 for a moving or animating entity: the client divides by it. */
     int32_t lerp_interval;
+    /* Facing shown to clients, in degrees. For a policy-driven monster this
+     * follows the direction it actually travels; the facing its policy steers
+     * by is the hook observation's angles[1] (#61). */
+    float yaw;
 } dqsim_entity;
 
 /* Library version as "major.minor.patch". The string is static. */
