@@ -85,6 +85,10 @@ typedef struct dqsim_entity {
     int32_t solid;      /* 0 not, 1 trigger, 2 bbox, 3 slidebox, 4 bsp */
     int32_t flags;      /* QuakeC FL_* bits: 32 monster, 256 item, 8 client */
     int32_t frame;      /* model animation frame the entity is showing (#61) */
+    /* The interpolation interval the server sends a client for this entity,
+     * in 1/255 s, or -1 when it sends none (the client then assumes 0.1 s).
+     * Never 0 for a moving or animating entity: the client divides by it. */
+    int32_t lerp_interval;
 } dqsim_entity;
 
 /* Library version as "major.minor.patch". The string is static. */

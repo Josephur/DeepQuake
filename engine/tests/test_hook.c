@@ -1302,6 +1302,11 @@ static int frame_bound(const char *map, const char *classname, int numframes)
                 CHECK(entities[i].frame >= 0 && entities[i].frame < numframes,
                       "%s stand frame %d outside the model's %d frames", classname,
                       entities[i].frame, numframes);
+                /* A zero interval makes the client blend with 0 / 0 and draw
+                 * nothing for that tick: the blink of #61. */
+                CHECK(entities[i].lerp_interval != 0,
+                      "%s stand tick %d: the client would be sent a zero interpolation "
+                      "interval", classname, t);
                 if (entities[i].frame > stand_max)
                     stand_max = entities[i].frame;
             }
@@ -1319,6 +1324,11 @@ static int frame_bound(const char *map, const char *classname, int numframes)
                 CHECK(entities[i].frame >= 0 && entities[i].frame < numframes,
                       "%s run frame %d outside the model's %d frames", classname,
                       entities[i].frame, numframes);
+                /* A zero interval makes the client blend with 0 / 0 and draw
+                 * nothing for that tick: the blink of #61. */
+                CHECK(entities[i].lerp_interval != 0,
+                      "%s run tick %d: the client would be sent a zero interpolation "
+                      "interval", classname, t);
                 if (entities[i].frame > run_max)
                     run_max = entities[i].frame;
             }

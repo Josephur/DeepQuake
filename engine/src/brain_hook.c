@@ -39,6 +39,20 @@
  * most 30 deg per 6-tick decision = 360 deg/s, so this keeps up but smooths the
  * step into a continuous turn. */
 #define DQ_MONSTER_TURN_RATE 360.0f
+/* How far past the next tick a driven monster's think is scheduled (#61).
+ * The hook thinks every tick. Scheduling the think for exactly the next tick
+ * made the server tell the client "finish interpolating in 0 seconds"
+ * (sv_main.c sends Q_rint((nextthink - sv.time) * 255) after sv.time has
+ * already advanced), and the client then blended the monster's position and
+ * pose with 0 / 0 (r_alias.c: (cl.time - lerpstart) / (lerpfinish -
+ * lerpstart), all three equal on a local server). The NaN position or pose
+ * draws nothing, so the monster blinked out for a tick every time it moved,
+ * turned or changed frame - and stopped blinking in an attack, whose stock
+ * states think 0.1 s apart. The margin keeps that interval at two 1/255 s
+ * steps, clear of zero with room for float rounding late in a long level; it
+ * is capped at half a tick so the think still runs on the very next tick
+ * (SV_RunThink runs a think that is due before the end of the tick). */
+#define DQ_THINK_MARGIN 0.006
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
@@ -749,7 +763,10 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         else if (slot->stand_len > 0)
             ent->v.frame = slot->stand_seq[step % (unsigned)slot->stand_len];
         ent->v.think = fnum;
-        ent->v.nextthink = (float)(sv.time + host_frametime);
+        double margin = 0.5 * host_frametime;
+        if (margin > DQ_THINK_MARGIN)
+            margin = DQ_THINK_MARGIN;
+        ent->v.nextthink = (float)(sv.time + host_frametime + margin);
     }
 }
 

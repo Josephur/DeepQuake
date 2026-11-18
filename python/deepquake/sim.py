@@ -91,6 +91,7 @@ class _Entity(ctypes.Structure):
         ("solid", ctypes.c_int32),
         ("flags", ctypes.c_int32),
         ("frame", ctypes.c_int32),
+        ("lerp_interval", ctypes.c_int32),
     ]
 
 
@@ -193,6 +194,8 @@ class Entity:
     solid: int
     flags: int
     frame: int = 0  # model animation frame the entity is showing (#61)
+    # Interpolation interval sent to a client, in 1/255 s; -1 = none sent (#61)
+    lerp_interval: int = -1
 
 
 @dataclass(frozen=True)
@@ -506,6 +509,7 @@ def entities() -> list[Entity]:
             solid=e.solid,
             flags=e.flags,
             frame=e.frame,
+            lerp_interval=e.lerp_interval,
         )
         for e in buffer[:count]
     ]

@@ -456,6 +456,9 @@ static int copy_entities(dqsim_entity *out, int max)
             e->solid = (int)ent->v.solid;
             e->flags = (int)ent->v.flags;
             e->frame = (int)ent->v.frame;
+            /* As SV_WriteEntitiesToClient writes it under U_LERPFINISH. */
+            e->lerp_interval =
+                ent->sendinterval ? (byte)Q_rint((ent->v.nextthink - sv.time) * 255) : -1;
         }
         count++;
     }
