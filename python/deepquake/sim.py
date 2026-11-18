@@ -302,7 +302,9 @@ def init(
     ``progs.dat`` shadows id1's); names with separators or ``..`` raise
     :class:`SimError`.
     """
+    global _default_gamedata
     base = Path(basedir) if basedir is not None else gamedata.gamedata_dir()
+    _default_gamedata = game is None and base.resolve() == gamedata.gamedata_dir().resolve()
     config = _Config(
         os.fsencode(base),
         heap_mb,
@@ -311,6 +313,14 @@ def init(
         os.fsencode(game) if game else None,
     )
     _check(_load().dqsim_init(ctypes.byref(config)))
+
+
+_default_gamedata = False
+
+
+def uses_default_gamedata() -> bool:
+    """Was the engine started on the project's own game data, with no game directory?"""
+    return _default_gamedata
 
 
 def progs_is_stock() -> bool:

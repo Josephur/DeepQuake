@@ -31,7 +31,7 @@ def require_gamedata() -> None:
         pytest.skip("no usable game data; see gamedata/README.md")
 
 
-def run_in_subprocess(code: str, timeout: float = 120) -> dict:
+def run_in_subprocess(code: str, timeout: float = 120, env: dict | None = None) -> dict:
     """Run code in a new interpreter; it must print one JSON object last.
 
     ``timeout`` is generous by default so a hang is caught; a caller whose
@@ -39,7 +39,11 @@ def run_in_subprocess(code: str, timeout: float = 120) -> dict:
     its own.
     """
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=None if env is None else {**os.environ, **env},
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])

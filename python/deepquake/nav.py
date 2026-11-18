@@ -45,15 +45,18 @@ strafe {right, none, left}, turn {-30, -10, 0, +10, +30 degrees}, jump
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import math
+import os
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
-from . import sim
+from . import REPO_ROOT, gamedata, sim
 
 RAY_PITCHES = (0.0, 30.0)
 RAY_YAWS = 24
@@ -83,6 +86,57 @@ _DOOR_PUSH_TICKS = 96  # straight pushing that takes the player through a door (
 _DOOR_RANGE = 400.0  # how far from a point a door may still be worth a detour
 _TRIGGER_RANGE = 700.0  # a trigger zone is worth a longer detour than a door
 _SEAM_RANGE = 900.0  # nearest unreached points this far out are still worth a probe
+
+
+#: Where built walk graphs are kept (local run output, never committed).
+#: The environment variable ``DEEPQUAKE_GRAPH_CACHE`` names another directory,
+#: or turns the cache off with ``off``.
+GRAPH_CACHE_DIR = REPO_ROOT / "runs" / "walk_graphs"
+
+
+def _graph_cache_path(map_name: str, skill: int) -> Path | None:
+    """The cache file for this map's walk graph, or None when it is not cached.
+
+    Exploring a map takes one to five minutes and gives the same graph every
+    time, so the result is kept on disk. The file name carries a hash of
+    everything the graph depends on: this module (the exploration itself), the
+    simulator library, and a listing of the game data with sizes and
+    modification times. Change any of them and the graph is rebuilt. Only the
+    project's own game data is cached: a simulator started on another base or
+    game directory (the generated test maps) always explores.
+    """
+    setting = os.environ.get("DEEPQUAKE_GRAPH_CACHE", "")
+    if setting == "off" or not sim.uses_default_gamedata():
+        return None
+    directory = Path(setting) if setting else GRAPH_CACHE_DIR
+    digest = hashlib.sha256()
+    digest.update(Path(__file__).read_bytes())
+    digest.update(sim.find_library().read_bytes())
+    data = gamedata.gamedata_dir() / "id1"
+    for path in sorted(data.rglob("*")):
+        if path.is_file():
+            stat = path.stat()
+            entry = f"{path.relative_to(data)}:{stat.st_size}:{stat.st_mtime_ns}\n"
+            digest.update(entry.encode())
+    return directory / f"{map_name}-skill{skill}-{digest.hexdigest()[:16]}.npz"
+
+
+def _read_graph(path: Path | None) -> tuple[np.ndarray, np.ndarray] | None:
+    if path is None or not path.is_file():
+        return None
+    with np.load(path) as saved:
+        return saved["points"], saved["path_distance"]
+
+
+def _write_graph(path: Path | None, points: np.ndarray, path_distance: np.ndarray) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Written beside the target and renamed, so a process that reads while
+    # another writes sees the whole file or none of it.
+    partial = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
+    np.savez(partial, points=points, path_distance=path_distance)
+    os.replace(partial, path)
 
 
 def hash_name(name: str) -> int:
@@ -733,6 +787,26 @@ class NavEnv:
             sim.step(repeat=2)
             self._episodes_since_load = 0
 
+        cache = _graph_cache_path(map_name, skill)
+        cached = _read_graph(cache)
+        if cached is None:
+            self._explore(load_fresh)
+            _write_graph(cache, self.points, self.path_distance)
+        else:
+            self.points, self.path_distance = cached
+        # A cached and an explored environment hand over the same simulator:
+        # a fresh load, not whatever the exploration left behind.
+        load_fresh()
+
+        self.goal_index = 0
+        self.goal = np.zeros(3, dtype=np.float32)
+        self.yaw = 0.0
+        self.steps = 0
+        self.remaining = 0.0  # estimated walking distance still to go
+
+    def _explore(self, load_fresh: Callable[[], None]) -> None:
+        """Build the walk graph: sets ``points`` and ``path_distance``."""
+        map_name = self.map_name
         load_fresh()
         points, links = explore_walk_graph(map_name, load_fresh)
         load_fresh()  # exploring opened doors and took items
@@ -782,12 +856,6 @@ class NavEnv:
         self.path_distance = path_distances(len(self.points), self.points, links)
         if len(self.points) < 10:
             raise RuntimeError(f"only {len(self.points)} standing points found on {map_name}")
-
-        self.goal_index = 0
-        self.goal = np.zeros(3, dtype=np.float32)
-        self.yaw = 0.0
-        self.steps = 0
-        self.remaining = 0.0  # estimated walking distance still to go
 
     def _load_map(self) -> None:
         sim.load_map(self.map_name, skill=self.skill, seed=int(self.rng.integers(2**31)))

@@ -148,3 +148,44 @@ def test_reachability_started_from_known_edges():
     assert reach.reaches(0, 2) and not reach.reaches(2, 0)
     reach.add(2, 3)
     assert reach.reaches(0, 3) and not reach.reaches(3, 0)
+
+
+GRAPH = """
+import hashlib, json
+import numpy as np
+from deepquake import nav, sim
+
+sim.init()
+env = nav.NavEnv("e1m1", seed=3)
+after_init = sim.state_hash()
+obs = env.reset()
+for _ in range(20):
+    env.step(np.array([2, 1, 2, 0]))
+print(json.dumps({
+    "points": hashlib.sha256(env.points.tobytes()).hexdigest(),
+    "distances": hashlib.sha256(env.path_distance.tobytes()).hexdigest(),
+    "shapes": [list(env.points.shape), list(env.path_distance.shape)],
+    "dtypes": [str(env.points.dtype), str(env.path_distance.dtype)],
+    "after_init": after_init, "after_steps": sim.state_hash(),
+}))
+"""
+
+
+@pytest.mark.gamedata
+def test_a_cached_walk_graph_is_the_explored_one(tmp_path):
+    """The walk graph is explored once and then read from disk (#64).
+
+    The first process finds an empty cache directory, explores e1m1 and
+    saves the graph; the second reads it. Both must hold the same points and
+    path distances and leave the simulator in the same state, at construction
+    and after an episode's first steps.
+    """
+    require_gamedata()
+    env = {"DEEPQUAKE_GRAPH_CACHE": str(tmp_path)}
+    explored = run_in_subprocess(GRAPH, timeout=900, env=env)
+    saved = list(tmp_path.glob("e1m1-skill0-*.npz"))
+    assert len(saved) == 1, "the exploration did not save its graph"
+    modified = saved[0].stat().st_mtime_ns
+    cached = run_in_subprocess(GRAPH, timeout=900, env=env)
+    assert saved[0].stat().st_mtime_ns == modified, "the second process explored again"
+    assert cached == explored

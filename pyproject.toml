@@ -20,6 +20,7 @@ train = [
 [dependency-groups]
 dev = [
   "pytest>=8",
+  "pytest-xdist>=3.6",
   "ruff>=0.6",
 ]
 
@@ -32,7 +33,9 @@ packages = ["python/deepquake"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
-addopts = "-ra --strict-markers"
+# Tests are independent (each engine test runs in its own process), so they
+# run eight at a time; `-n 0` runs them one by one.
+addopts = "-ra --strict-markers -n 8"
 markers = [
   "gamedata: needs the user's Quake data in gamedata/id1 (deselected in CI)",
   "gpu: needs a CUDA GPU (deselected in CI)",

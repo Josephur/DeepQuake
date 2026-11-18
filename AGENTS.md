@@ -178,6 +178,13 @@ uv run python -m deepquake.eval_nav                                   # baseline
 Python loads the **release** build of the library first, so rebuild the
 release preset before running pytest after any engine change.
 
+pytest runs eight tests at a time (`-n 0` runs them one by one). The walk
+graph of each map is explored once and kept in `runs/walk_graphs/`; it is
+rebuilt when the game data, the simulator library or `nav.py` changes. So
+the full suite takes about two minutes, and about fifteen on the first run
+after an engine change. Set `DEEPQUAKE_GRAPH_CACHE=off` to explore every
+time.
+
 CI (`.github/workflows/ci.yml`) runs the same commands with no game data and
 no GPU. Anything needing game data or a GPU must be a pytest test marked
 `gamedata` or `gpu` (deselected in CI), or a ctest test that exits with code
