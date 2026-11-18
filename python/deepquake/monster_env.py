@@ -32,9 +32,10 @@ for the trained and the stock brain alike.
 Observation (monster side, length :data:`monster_obs.MONSTER_OBS_DIM`): see
 :mod:`deepquake.monster`. Action (4 integers, :data:`MONSTER_ACTION_NVEC`):
 forward {back, stop, ahead} and strafe {left, none, right} at the
-monster's speed (:data:`MONSTER_SPEED` commanded — the engine's monster
-physics cap what actually moves, about 0.55x, measured in the #35
-spike), turn in the same 7-step grid the player got from #40
+monster's speed (:data:`MONSTER_SPEED` commanded — the hook caps what
+actually moves at the class's own walk or run speed, read from its
+QuakeC states: walking until the monster has an enemy, running after;
+#61), turn in the same 7-step grid the player got from #40
 (accumulated into the facing the hook wants), and attack, which starts
 the real QuakeC attack sequence when the player is visible and the
 QuakeC cooldown has expired.

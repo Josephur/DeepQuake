@@ -176,7 +176,12 @@ own origin, velocity, facing, health and ground/water state; a 2×24 ray
 fan with surface kinds from its eye; the entities it has line of sight
 to, nearest first) and returns an action: absolute facing, forward/side
 speeds, and an attack flag. Movement is applied as ground steps or air
-velocity at that same point in the tick and the decision think is
+velocity at that same point in the tick, capped at the body's own speed:
+the average of the distances the class's walk and run states pass to
+`ai_walk` and `ai_run` (a Grunt walks at 18 units a second and runs at
+109, a Dog runs at about 330). The monster walks, in its walk frames,
+until it has an enemy (it saw the player or was hurt) and runs from then
+on. The decision think is
 rescheduled one tick later (a few milliseconds past it: a think due
 exactly on the next tick makes the server send clients a zero
 interpolation interval, which the client divides by), so the policy

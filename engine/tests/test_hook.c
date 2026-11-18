@@ -1520,6 +1520,82 @@ static int melee_needs_reach(const char *map, const char *classname, float from,
     return 0;
 }
 
+/* Show the idle driven monster the player: from then on it has an enemy and
+ * runs rather than walks (#61). */
+static int alert_driven(void)
+{
+    const dqsim_action idle = {0};
+    driven_mode = 0;
+    for (int k = 0; k < 24; k++) {
+        if (!place_player_ahead(driven_origin, driven_yaw + (float)(k * 15), 200.0f))
+            continue;
+        for (int tick = 0; tick < 24; tick++) {
+            driven_saw_player = 0;
+            if (dqsim_step_repeat(&idle, 1) != DQSIM_OK)
+                return 0;
+            if (driven_saw_player)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* A driven monster moves at its own body's speed, in the frames drawn for it
+ * (#61). The policy commands the player's 400 units a second; applied as
+ * given, a Grunt crossed the floor at four times its stock run speed with its
+ * run frames ticking over at their usual rate: it slid. The hook now caps the
+ * move at the speed of the class's own states - the Grunt's walk chain
+ * (frames 90-113) averages 18 units a second, its run chain (73-80) 109 - and
+ * the monster walks until it has an enemy, then runs. */
+static int body_speed(void)
+{
+    const dqsim_action idle = {0};
+    dqsim_entity self;
+    int index;
+    if (driven_start("e1m1", "monster_army", &index))
+        return 1;
+    driven_saw_player = 0;
+    driven_mode = 0;
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "look");
+    CHECK(!driven_saw_player, "the Grunt sees the player from the start: nothing to walk for");
+
+    float fastest[2] = {0.0f, 0.0f};
+    int moving[2] = {0, 0};
+    for (int phase = 0; phase < 2; phase++) {
+        if (phase == 1)
+            CHECK(alert_driven(), "no spot in the Grunt's sight");
+        int lo = phase ? 73 : 90, hi = phase ? 80 : 113;
+        float last[3];
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        memcpy(last, self.origin, sizeof(last));
+        driven_mode = 1;
+        for (int t = 0; t < 144; t++) {
+            CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "forward tick");
+            CHECK(driven_entity(index, &self), "the Grunt is gone");
+            float step = flat_distance(self.origin, last);
+            memcpy(last, self.origin, sizeof(last));
+            if (step <= 0.0f)
+                continue;
+            moving[phase]++;
+            if (step > fastest[phase])
+                fastest[phase] = step;
+            CHECK(self.frame >= lo && self.frame <= hi,
+                  "%s tick %d: moved %.2f units showing frame %d, not %d-%d",
+                  phase ? "run" : "walk", t, step, self.frame, lo, hi);
+        }
+    }
+    printf("grunt: walks at up to %.1f units/s (%d ticks), runs at up to %.1f (%d ticks)\n",
+           fastest[0] * 72.0f, moving[0], fastest[1] * 72.0f, moving[1]);
+    CHECK(moving[0] > 100 && moving[1] > 100, "the Grunt moved on only %d walk and %d run ticks",
+          moving[0], moving[1]);
+    CHECK(fastest[0] * 72.0f < 25.0f, "the Grunt walks at %.1f units/s; its walk states do 18",
+          fastest[0] * 72.0f);
+    CHECK(fastest[1] * 72.0f > 90.0f && fastest[1] * 72.0f < 125.0f,
+          "the Grunt runs at %.1f units/s; its run states do 109", fastest[1] * 72.0f);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 static float angle_between(float a, float b)
 {
     float d = fmodf(a - b, 360.0f);
@@ -1545,6 +1621,8 @@ static int shown_facing(void)
     int index;
     if (driven_start("e1m1", "monster_army", &index))
         return 1;
+    /* With an enemy, so it runs: a walk covers too little ground to measure. */
+    CHECK(alert_driven(), "no spot in the Grunt's sight");
 
     /* Strafing: whichever side is open. */
     float policy_yaw = driven_yaw;
@@ -1593,7 +1671,7 @@ static int shown_facing(void)
             held++;
             CHECK(self.frame <= 7, "tick %d: held in place but showing run frame %d", t,
                   self.frame);
-        } else if (step > 2.0f) {
+        } else if (step > 1.0f) { /* a Grunt's run is 1.5 units a tick */
             ran++;
             CHECK(self.frame >= 73 && self.frame <= 80,
                   "tick %d: moved %.2f units but showing frame %d", t, step, self.frame);
@@ -1651,7 +1729,7 @@ int main(int argc, char **argv)
         shalrath_aim_error() || knight_drive() || knight_attack() || fiend_drive() ||
         fiend_attack() || fiend_leap() || shambler_drive() || shambler_claw() ||
         shambler_beam() || shambler_aim_error() || animation_frames() ||
-        movement_continuity() || shown_facing() ||
+        movement_continuity() || shown_facing() || body_speed() ||
         melee_needs_reach("e1m1", "monster_dog", 350.0f, 48, 59) ||
         melee_needs_reach("e2m5", "monster_demon1", 350.0f, 21, 26) ||
         melee_needs_reach("e1m4", "monster_knight", 350.0f, 9, 16))

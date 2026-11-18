@@ -85,14 +85,23 @@
  * for an Ogre-sized one, whose corner-to-corner contact distance is already
  * 68. The height limit keeps a monster from swinging at a player on a ledge
  * above it. The leap window is the stock one: CheckDogJump leaps between 80
- * and 150 units, CheckDemonJump between 100 and 200. The charge runs at about
- * a stock Dog's or Fiend's top running speed (ai_run 32 to 36 units per 0.1 s
- * think), in units per second. */
+ * and 150 units, CheckDemonJump between 100 and 200. The charge runs at the
+ * class's own run speed (see DQ_STATE_INTERVAL); DQ_CHARGE_SPEED, in units per
+ * second, stands in for a class whose run chain names no distance. */
 #define DQ_MELEE_REACH_MARGIN 48.0f
 #define DQ_MELEE_REACH_HEIGHT 64.0f
 #define DQ_LEAP_MIN 100.0f
 #define DQ_LEAP_MAX 200.0f
 #define DQ_CHARGE_SPEED 320.0f
+/* A driven monster moves at its own body's speed (#61). The policy commands
+ * the player's 400 units a second; a stock Grunt runs at about 110 and its run
+ * frames are drawn for that, so at 400 it skated across the floor with its
+ * legs barely moving. Each class's speeds are read from its own states: the
+ * distances its walk and run chains pass to ai_walk and ai_run, one state
+ * every 0.1 s. Whatever the policy asks for is capped there. It walks, with
+ * its walk frames, until it has an enemy - it saw the player or was hurt, the
+ * stock rule for leaving the walk states - and runs from then on. */
+#define DQ_STATE_INTERVAL 0.1f
 typedef struct dq_hook_slot {
     int entity_index; /* entity number, 0 = free slot */
     dqsim_hook_callback callback;
@@ -131,6 +140,11 @@ typedef struct dq_hook_slot {
     int stand_len;
     float run_seq[DQ_MAX_ANIM_FRAMES];
     int run_len;
+    float walk_seq[DQ_MAX_ANIM_FRAMES];
+    int walk_len;
+    /* The body's own speeds in units per second (see DQ_STATE_INTERVAL);
+     * 0 = the class's chain names no distance, and nothing is capped. */
+    float run_speed, walk_speed;
     unsigned anim_tick;
     dq_handicap_state handicap;
     int skill;
@@ -610,16 +624,44 @@ static float state_frame(func_t fnum)
     return pr_globals[statement->a];
 }
 
+/* The distance a state moves the monster: the constant it passes to `mover`
+ * ("ai_run", "ai_walk"), 0 when it does not call it. QuakeC compiles the call
+ * as a store of the constant into the first parameter (a vector store, whatever
+ * the type), then the call. */
+static float state_move_distance(func_t fnum, const char *mover)
+{
+    dfunction_t *function = &pr_functions[fnum];
+    float parm = 0.0f;
+    for (int s = 0; s < 512; s++) {
+        dstatement_t *statement = &pr_statements[function->first_statement + s];
+        if (statement->op == OP_DONE || statement->op == OP_RETURN)
+            break;
+        if (statement->op >= OP_STORE_F && statement->op <= OP_STORE_FNC &&
+            statement->b == OFS_PARM0)
+            parm = pr_globals[statement->a];
+        if (statement->op == OP_CALL1) {
+            func_t called;
+            memcpy(&called, &pr_globals[statement->a], sizeof(called));
+            if (called > 0 && called < progs->numfunctions &&
+                strcmp(PR_GetString(pr_functions[called].s_name), mover) == 0)
+                return parm;
+        }
+    }
+    return 0.0f;
+}
+
 /* Collect the frames of a stand/run chain in play order (#61): follow each
  * state's next think, recording its frame, until the chain loops back on a
  * state already seen, leaves the animation states, or fills the table. The
  * result is exactly the cycle the stock QuakeC animates - including a run
  * whose last state reuses an earlier frame - so every entry is a frame the
- * class's model has. Returns the number of frames collected. */
-static int walk_chain_frames(func_t start, float *out, int max)
+ * class's model has. Returns the number of frames collected. With `mover`,
+ * `speed` receives the chain's average speed in units per second. */
+static int walk_chain_frames(func_t start, float *out, int max, const char *mover, float *speed)
 {
     func_t visited[DQ_MAX_ANIM_FRAMES];
     int n = 0;
+    float travelled = 0.0f;
     for (func_t f = start; f && n < max; f = chain_next(f)) {
         int seen = 0;
         for (int i = 0; i < n; i++)
@@ -634,7 +676,11 @@ static int walk_chain_frames(func_t start, float *out, int max)
             break;
         visited[n] = f;
         out[n++] = frame;
+        if (mover)
+            travelled += state_move_distance(f, mover);
     }
+    if (speed)
+        *speed = n > 0 ? travelled / ((float)n * DQ_STATE_INTERVAL) : 0.0f;
     return n;
 }
 
@@ -788,6 +834,18 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
                 enemy = EDICT_NUM(obs->visible[i].index);
                 break;
             }
+    /* Seeing a live player gives the monster its enemy, as the stock sight
+     * check does; being hurt already did (T_Damage). With an enemy it runs,
+     * without one it walks (see DQ_STATE_INTERVAL). */
+    if (!ent->v.enemy)
+        for (int i = 0; i < obs->visible_count; i++)
+            if ((obs->visible[i].flags & FL_CLIENT) && obs->visible[i].health > 0) {
+                ent->v.enemy = EDICT_TO_PROG(EDICT_NUM(obs->visible[i].index));
+                break;
+            }
+    int running = ent->v.enemy || slot->walk_len == 0 || slot->walk_speed <= 0.0f;
+    float body_speed = running ? slot->run_speed : slot->walk_speed;
+    float charge_speed = slot->run_speed > 0.0f ? slot->run_speed : DQ_CHARGE_SPEED;
     eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
     int ready = !cooldown || sv.time >= cooldown->_float;
 
@@ -802,7 +860,7 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         float dy = enemy->v.origin[1] - ent->v.origin[1];
         float distance = sqrtf(dx * dx + dy * dy);
         want_yaw = atan2f(dy, dx) * 180.0f / 3.14159265f;
-        want_forward = DQ_CHARGE_SPEED;
+        want_forward = charge_speed;
         want_side = 0;
         if (slot->leap_think && ready && ((int)ent->v.flags & FL_ONGROUND) &&
             distance >= DQ_LEAP_MIN && distance <= DQ_LEAP_MAX &&
@@ -834,11 +892,11 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         ent->v.goalentity = EDICT_TO_PROG(enemy);
         ent->v.yaw_speed = DQ_MONSTER_TURN_RATE * (float)host_frametime;
         pr_global_struct->self = EDICT_TO_PROG(ent);
-        G_FLOAT(OFS_PARM0) = DQ_CHARGE_SPEED * (float)host_frametime;
+        G_FLOAT(OFS_PARM0) = charge_speed * (float)host_frametime;
         SV_MoveToGoal();
         ent->v.yaw_speed = yaw_speed;
         float dx = ent->v.origin[0] - before[0], dy = ent->v.origin[1] - before[1];
-        float asked = DQ_CHARGE_SPEED * (float)host_frametime * DQ_MOVED_FRACTION;
+        float asked = charge_speed * (float)host_frametime * DQ_MOVED_FRACTION;
         chase_moved = dx * dx + dy * dy >= asked * asked;
         chased = 1;
         new_yaw = ent->v.angles[YAW];
@@ -853,6 +911,11 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
     if (leap || chased)
         wish[0] = wish[1] = 0;
     float speed = sqrtf(wish[0] * wish[0] + wish[1] * wish[1]);
+    if (body_speed > 0.0f && speed > body_speed) {
+        wish[0] *= body_speed / speed;
+        wish[1] *= body_speed / speed;
+        speed = body_speed;
+    }
     /* What the body actually did this tick: the direction it travelled, or
      * nothing when the step was refused (a wall, a ledge, another monster). */
     int moved = chase_moved;
@@ -932,7 +995,9 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
          * think cadence. */
         slot->anim_tick++;
         unsigned step = slot->anim_tick / 7;
-        if (moved && slot->run_len > 0)
+        if (moved && !running)
+            ent->v.frame = slot->walk_seq[step % (unsigned)slot->walk_len];
+        else if (moved && slot->run_len > 0)
             ent->v.frame = slot->run_seq[step % (unsigned)slot->run_len];
         else if (slot->stand_len > 0)
             ent->v.frame = slot->stand_seq[step % (unsigned)slot->stand_len];
@@ -1144,8 +1209,15 @@ static int resolve_prefix(dq_hook_slot *slot, const char *prefix)
     q_snprintf(name, sizeof(name), "%srun1", prefix);
     run_start = find_function(name);
 
-    slot->stand_len = walk_chain_frames(stand_start, slot->stand_seq, DQ_MAX_ANIM_FRAMES);
-    slot->run_len = walk_chain_frames(run_start, slot->run_seq, DQ_MAX_ANIM_FRAMES);
+    q_snprintf(name, sizeof(name), "%swalk1", prefix);
+    func_t walk_start = find_function(name);
+
+    slot->stand_len =
+        walk_chain_frames(stand_start, slot->stand_seq, DQ_MAX_ANIM_FRAMES, NULL, NULL);
+    slot->run_len = walk_chain_frames(run_start, slot->run_seq, DQ_MAX_ANIM_FRAMES, "ai_run",
+                                      &slot->run_speed);
+    slot->walk_len = walk_chain_frames(walk_start, slot->walk_seq, DQ_MAX_ANIM_FRAMES,
+                                       "ai_walk", &slot->walk_speed);
     if (slot->stand_len == 0 && slot->run_len == 0)
         return 0; /* not a class with the usual frames: leave the slot alone */
 
