@@ -56,11 +56,18 @@ MONSTER_ACTION_NVEC = (3, 3, 7, 2)
 MONSTER_TURN_DEGREES = combat.TURN_DEGREES
 MONSTER_SPEED = nav.RUN_SPEED
 DEFAULT_STYLE = (0.5, 0.5, 0.5)
+#: The player action that does nothing: no move, no turn, no jump, no fire.
+STILL_ACTION = np.array(
+    [1, 1, combat.TURN_DEGREES.index(0.0), 0, 0, combat.PITCH_DEGREES.index(0.0)]
+)
 
 
 @dataclass(frozen=True)
 class PlayerOpponent:
-    """Who plays the player side: ``random``, ``shooter`` or ``trained``.
+    """Who plays the player side: ``random``, ``shooter``, ``trained`` or ``still``.
+
+    ``still`` stands where it was put and does nothing: the harmless target
+    of the fight check (#65).
 
     A ``trained`` opponent loads a player checkpoint (#38) and must be
     given its file path; it is a fixed, frozen sparring partner.
@@ -72,7 +79,7 @@ class PlayerOpponent:
     def build(self, seed: int) -> _Opponent:
         if self.kind == "trained" and not self.checkpoint:
             raise ValueError("a trained opponent needs a checkpoint path")
-        if self.kind not in ("random", "shooter", "trained"):
+        if self.kind not in ("random", "shooter", "trained", "still"):
             raise ValueError(f"unknown opponent kind {self.kind!r}")
         return _Opponent(self, seed)
 
@@ -106,6 +113,8 @@ class _Opponent:
         obs = combat.player_observation(
             state, enemy, visible, distances, kinds, steps, timeout_steps
         )
+        if self.spec.kind == "still":
+            return STILL_ACTION
         if self.spec.kind == "random":
             return np.array([int(self.rng.integers(n)) for n in combat.ACTION_NVEC])
         if self.spec.kind == "shooter":
@@ -143,9 +152,13 @@ class MonsterEnv:
         styles: Sequence[tuple[float, float, float]] = (DEFAULT_STYLE,),
         brain: str = "policy",
         points: np.ndarray | None = None,
+        placement: str = "hidden",
+        others_passive: bool = False,
     ):
         if reward not in combat.REWARDS:
             raise ValueError(f"reward must be one of {combat.REWARDS}, got {reward!r}")
+        if placement not in ("hidden", "sight"):
+            raise ValueError(f"placement must be 'hidden' or 'sight', got {placement!r}")
         if brain not in ("policy", "stock"):
             raise ValueError(f"brain must be 'policy' or 'stock', got {brain!r}")
         if not skills or any(int(s) not in (0, 1, 2, 3) for s in skills):
@@ -174,6 +187,15 @@ class MonsterEnv:
         self.skills = tuple(int(s) for s in skills)
         self.styles = tuple(tuple(float(v) for v in style) for style in styles)
         self.brain = brain
+        #: ``hidden`` is the training placement: line of sight broken, the
+        #: task is to find the fight. ``sight`` starts the fight: the player
+        #: is put where the monster can see it (#65).
+        self.placement = placement
+        #: Keep the level's other monsters out of it (``notarget``): they
+        #: neither chase nor shoot, so every point of damage the player takes
+        #: is the driven monster's. The hooked monster is unaffected: it sees
+        #: through the hook's own line-of-sight report.
+        self.others_passive = others_passive
         self.rng = np.random.default_rng(seed)
         # The walk graph is a property of the map; building it needs the
         # passive-navigation setup, which NavEnv's constructor performs.
@@ -218,6 +240,8 @@ class MonsterEnv:
         a level does not have still trains on that level.
         """
         sim.load_map(self.map_name, skill=skill, seed=load_seed)
+        if self.others_passive:
+            sim.client_command("notarget")
         sim.step(repeat=2)
         return [e for e in sim.entities() if e.classname.startswith("monster_")]
 
@@ -253,14 +277,17 @@ class MonsterEnv:
             if not sim.teleport(start, yaw):
                 continue
             sim.step(yaw=yaw, repeat=2)
-            if self.los_broken_required and combat.visible_from(
+            seen = combat.visible_from(
                 sim.player(), enemy, sim.ray_fan(nav.RAY_PITCHES, nav.RAY_YAWS, nav.RAY_DISTANCE)[0]
-            ):
+            )
+            if self.placement == "sight" and not seen:
+                continue
+            if self.placement == "hidden" and self.los_broken_required and seen:
                 continue
             self.player_yaw = yaw
             self.player_pitch = 0.0
             return
-        raise RuntimeError("no line-of-sight-broken start for the monster task")
+        raise RuntimeError(f"no {self.placement} start for the monster task")
 
     def _start(
         self,

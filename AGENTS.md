@@ -193,6 +193,66 @@ the resource is missing. Because CI cannot run them, **you must run them
 locally before closing any issue that touches `engine/`**, and say in the
 closing comment that you did.
 
+## Training a model
+
+A training run costs days of machine time, and a bad one costs more: the
+models-v8 to v11 monsters were released on good-looking win rates, and in
+play they turned away from the player and did not attack (#63, #65). These
+rules exist so that cannot happen again, whoever runs the training.
+
+**Before a run**
+
+1. A monster training run starts only on an issue where the maintainer has
+   written the go-ahead for that run's design (placement, reward, opponents).
+   Without it, label the issue `needs-human` and stop. Do not design the
+   training yourself and start it.
+2. All checks under "Build, test, check" pass on `main`, including the
+   game-data tests. Never train on a branch with failing checks.
+3. Run the config for a few minutes first under a different `name`
+   (`<name>_smoke`) and check that `progress.csv` is being written and the
+   steps per second are in the range the issue expects.
+4. Start the real run with `nohup`, log to `runs/<name>.log`, and write a
+   Checkpoint naming the run before doing anything else.
+
+**After a run**
+
+1. `uv run python -m deepquake.fight_check runs/<name>/checkpoint.pt`
+   It prints, per class, the model next to a scripted reference and next to
+   **random button presses** in the same body, and writes
+   `runs/<name>/fight_check.json`.
+2. Paste the whole table into the issue, pass or fail.
+3. Read the random column. The engine turns a monster to a visible player,
+   charges and runs the stock attack whenever attack is pressed, so random
+   presses already kill a standing player. **A model whose numbers match the
+   random column has learned nothing, even if every row says "pass".** Say so
+   in the issue in those words, and do not release it.
+4. `release_model` refuses a monster model without a passing report for
+   exactly that checkpoint file. A pass is necessary, not sufficient: a
+   model is released only after the maintainer has played it and said so on
+   the issue.
+
+**Never**
+
+- change `fight_check.py` (the probe, its thresholds, its maps, its seed),
+  the evaluation tasks, or the reference so that a model passes. A model
+  that fails does not fight; the fix is in the training. If you believe the
+  check itself is wrong, write why on the issue, label it `needs-human`,
+  and stop;
+- write or edit `fight_check.json` by hand, or copy one from another run;
+- report a win rate without saying who the opponent was. Wins against the
+  trained sparring player are not evidence: it walks into attacks;
+- continue (`--resume`, `init_from`) from a checkpoint that failed the check
+  unless the issue's go-ahead says to;
+- start a second training run while one is running, or kill a run you did
+  not start.
+
+**Stop and write a Checkpoint when**
+
+- the run's log shows an error, NaN losses, or steps per second below half
+  of what the issue expects (see #54);
+- the model fails the check, or matches the random column. Report the
+  table and wait: do not retrain with changed settings on your own.
+
 ## Work tracking: every change has a GitHub issue
 
 The issue tracker is the project's history. Use the `gh` CLI.

@@ -51,6 +51,82 @@ def _manifest_for(files: dict[str, bytes], *, corrupt: bool = False) -> dict:
     }
 
 
+def _write_fight_check(run, classes, *, kill_rate=0.9, facing=0.9, sha=None, passed=None):
+    """A fight-check report for ``run``'s checkpoint with the given numbers."""
+    from deepquake import fight_check
+
+    side = {
+        "usable_tasks": 20,
+        "kill_rate": 0.9,
+        "damage_rate": 1.0,
+        "facing_fraction": 0.95,
+        "sight_decisions": 500,
+    }
+    report = {
+        "version": fight_check.REPORT_VERSION,
+        "checkpoint_sha256": sha or fight_check.sha256_file(run / "checkpoint.pt"),
+        "classes": {
+            name: {
+                "reference": dict(side),
+                "checkpoint": {**side, "kill_rate": kill_rate, "facing_fraction": facing},
+            }
+            for name in classes
+        },
+    }
+    if passed is not None:
+        report["passed"] = passed
+    (run / fight_check.REPORT_NAME).write_text(json.dumps(report))
+
+
+def test_a_monster_model_is_not_released_without_a_passing_fight_check(tmp_path):
+    """The release tool refuses every way of not having passed the check (#65)."""
+    pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    from deepquake import monster, monster_env
+
+    ppo.seed_everything(65)
+    classes = ["monster_army", "monster_dog"]
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM, monster_env.MONSTER_ACTION_NVEC, hidden=8, n_types=2
+    )
+    run = tmp_path / "pair"
+    run.mkdir()
+    ppo.save_checkpoint(run / "checkpoint.pt", model, None, {"total_steps": 1, "monsters": classes})
+    models = tmp_path / "models"
+
+    def refused(match):
+        with pytest.raises(SystemExit, match=match):
+            release_model.release_model(run, models, "pair")
+        assert not list((models / "pair").glob("*.onnx*")), "a refused model was left staged"
+
+    refused("has not been checked")
+    _write_fight_check(run, classes, sha="0" * 64)
+    refused("different checkpoint")
+    _write_fight_check(run, classes, kill_rate=0.2)
+    refused("kills the standing player in 20%")
+    _write_fight_check(run, classes, facing=0.3)
+    refused("faces the player on 30%")
+    _write_fight_check(run, classes[:1])
+    refused("monster_dog: not measured")
+    # The report's own verdict is not believed: the numbers are judged again.
+    _write_fight_check(run, classes, kill_rate=0.2, passed=True)
+    refused("kills the standing player")
+    _write_fight_check(run, classes)
+    assert release_model.release_model(run, models, "pair").is_file()
+
+
+def test_the_fight_check_cannot_pass_a_class_its_reference_cannot_measure():
+    """A weak reference means the probe is blind there: that is a failure, not a pass."""
+    from deepquake import fight_check
+
+    good = {"usable_tasks": 20, "kill_rate": 0.9, "facing_fraction": 0.9}
+    assert fight_check.judge_class(good, good) == []
+    assert "unmeasured" in fight_check.judge_class(good, {**good, "kill_rate": 0.3})[0]
+    assert "unmeasured" in fight_check.judge_class(good, {**good, "usable_tasks": 4})[0]
+    # 60% of the reference's rate is the bar, whatever the reference's rate is.
+    assert fight_check.judge_class({**good, "kill_rate": 0.54}, good) == []
+    assert fight_check.judge_class({**good, "kill_rate": 0.5}, good) != []
+
+
 def test_the_manifest_checksums_the_class_map(tmp_path):
     """A staged shared model names its classes and every file's hash (#48)."""
     pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
@@ -84,6 +160,10 @@ def test_the_manifest_checksums_the_class_map(tmp_path):
             ],
         },
     )
+    with pytest.raises(SystemExit, match="has not been checked"):
+        release_model.release_model(run, tmp_path / "models", "roster")
+    assert not (tmp_path / "models" / "roster" / "roster.onnx").exists()
+    _write_fight_check(run, monster.MONSTER_TYPES)
     manifest_path = release_model.release_model(run, tmp_path / "models", "roster")
     manifest = json.loads(manifest_path.read_text())
     assert manifest["format_version"] == 2
@@ -218,3 +298,33 @@ def test_the_download_tool_still_accepts_a_v1_manifest(tmp_path):
     }
     tool.install_archive(_asset(files, manifest), "grunt", tmp_path)
     assert (tmp_path / "grunt" / "grunt.onnx").read_bytes() == files["grunt.onnx"]
+
+
+FIGHT = """
+import json
+from deepquake import fight_check
+
+fight_check.EPISODES = 6
+fight_check.MIN_USABLE = 6
+out = {
+    brain: fight_check.run_class("monster_army", "e1m1", "", brain)
+    for brain in ("reference", "idle")
+}
+out["idle_reasons"] = fight_check.judge_class(out["idle"], out["reference"])
+out["reference_reasons"] = fight_check.judge_class(out["reference"], out["reference"])
+print(json.dumps(out))
+"""
+
+
+@pytest.mark.gamedata
+def test_the_fight_check_fails_a_grunt_that_does_not_attack():
+    """On e1m1 the scripted Grunt kills a standing player in sight; an idle one fails (#65)."""
+    from test_sim import require_gamedata, run_in_subprocess
+
+    require_gamedata()
+    out = run_in_subprocess(FIGHT, timeout=600)
+    assert out["reference"]["usable_tasks"] == 6
+    assert out["reference"]["kill_rate"] >= 0.8
+    assert out["reference_reasons"] == []
+    assert out["idle"]["kill_rate"] == 0.0
+    assert any("kills the standing player in 0%" in reason for reason in out["idle_reasons"])

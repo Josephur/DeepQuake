@@ -16,6 +16,12 @@ with the model, its sidecars, and a manifest:
 - ``onnx_sha256``, ``sidecar_sha256``, ``monsters_sha256`` — what the
   download tool verifies.
 
+A monster model is staged only with a passing fight check for exactly
+that checkpoint file (:mod:`deepquake.fight_check`, #65): the check is
+what stands between "training finished" and "released". There is no flag
+to skip it. A model that is not a monster policy (the player) has no such
+check.
+
 Re-running over the same run directory reproduces every byte: the
 manifest carries no timestamps and is never hand-edited.
 """
@@ -27,7 +33,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import REPO_ROOT, export_onnx
+from . import REPO_ROOT, export_onnx, fight_check
 
 MANIFEST_VERSION = 2
 
@@ -51,6 +57,13 @@ def release_model(run_dir: Path, models_dir: Path, name: str) -> Path:
     spec = export_onnx.export_onnx(checkpoint, onnx_path)
     sidecar = Path(str(onnx_path) + ".nvec")
     class_map = Path(str(onnx_path) + ".monsters")
+    if spec["monsters"]:
+        try:
+            fight_check.require_passing_report(checkpoint, list(spec["monsters"]))
+        except SystemExit:
+            for staged in (onnx_path, sidecar, class_map):
+                staged.unlink(missing_ok=True)
+            raise
 
     manifest = {
         "format_version": MANIFEST_VERSION,
