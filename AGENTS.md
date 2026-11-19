@@ -142,7 +142,7 @@ python/deepquake/       Python package
 python/tests/           pytest
 configs/                Training configs (TOML), one per experiment
 tools/                  Repo maintenance scripts (stdlib-only Python or POSIX sh)
-docs/                   ARCHITECTURE.md, ROADMAP.md
+docs/                   ARCHITECTURE.md, ROADMAP.md, RETRAIN_SPEC.md (the monster retraining plan)
 gamedata/               LOCAL ONLY. User's Quake data: gamedata/id1/pak0.pak, pak1.pak
 models/                 LOCAL ONLY. Downloaded or trained weights
 runs/                   LOCAL ONLY. Training logs and checkpoints
@@ -194,6 +194,13 @@ locally before closing any issue that touches `engine/`**, and say in the
 closing comment that you did.
 
 ## Training a model
+
+**Retraining the monster models follows `docs/RETRAIN_SPEC.md`.** When the
+maintainer asks to start or continue the retraining, that spec is the plan:
+work its lowest unfinished stage, exactly as written. It decides the order,
+the code changes, the configs, the probes and the pass bars; do not design
+any of them yourself. The rules below apply to it as well, and where the
+spec is stricter, the spec applies.
 
 A training run costs days of machine time, and a bad one costs more: the
 models-v8 to v11 monsters were released on good-looking win rates, and in
