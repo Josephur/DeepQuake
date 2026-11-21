@@ -106,6 +106,17 @@ HOOK_RAY_PITCHES = (0.0, 30.0)
 HOOK_RAY_YAWS = 24
 HOOK_MAX_VISIBLE = 16
 
+#: Hearing (RETRAIN_SPEC part 0B), mirroring dqsim.h: what a nominated
+#: monster hears and the pace the hook moves it at.
+HOOK_HEARD_SECONDS = 10.0
+PACE_WALK = 0
+PACE_INVESTIGATE = 1
+PACE_RUN = 2
+NOISE_GUNFIRE = 1
+NOISE_EXPLOSION = 2
+NOISE_CRY = 3
+NOISE_PLAYER = 4
+
 
 class _HookVisible(ctypes.Structure):
     _fields_ = [
@@ -133,6 +144,12 @@ class _HookObservation(ctypes.Structure):
         ("visible_count", ctypes.c_int32),
         ("visible", _HookVisible * HOOK_MAX_VISIBLE),
         ("attack_cooldown", ctypes.c_float),
+        ("start_health", ctypes.c_float),
+        ("heard", ctypes.c_int32),
+        ("heard_kind", ctypes.c_int32),
+        ("heard_relative", ctypes.c_float * 3),
+        ("heard_age", ctypes.c_float),
+        ("pace", ctypes.c_int32),
     ]
 
 
@@ -174,6 +191,15 @@ class HookObservation:
     ray_kinds: np.ndarray  # same shape, SURFACE_* values
     visible: tuple[HookVisible, ...]  # nearest first
     attack_cooldown: float = 0.0  # seconds until QuakeC lets it attack again
+    # Hearing (RETRAIN_SPEC part 0B): the remembered noise and the pace the
+    # hook moves the monster at now. heard_kind is for tests and logs, never
+    # a policy input.
+    start_health: float = 0.0  # health when nominated
+    heard: bool = False  # 1 while a heard noise is remembered
+    heard_kind: int = 0  # a NOISE_* constant
+    heard_relative: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    heard_age: float = 0.0  # seconds since it was heard
+    pace: int = 0  # a PACE_* constant
 
 
 @dataclass
@@ -357,6 +383,47 @@ def set_handicap_override(reaction_ticks: int, aim_error_deg: float) -> None:
     _check(_load().dqsim_set_handicap_override(reaction_ticks, aim_error_deg))
 
 
+class _Hearing(ctypes.Structure):
+    _fields_ = [
+        ("enabled", ctypes.c_int32),
+        ("range", ctypes.c_float),
+        ("run_chance", ctypes.c_float),
+        ("player_noises", ctypes.c_int32),
+    ]
+
+
+def set_hearing(
+    *,
+    enabled: bool = True,
+    range: float = 0.0,
+    run_chance: float = -1.0,
+    player_noises: bool = False,
+) -> None:
+    """Set the engine glue's hearing settings (RETRAIN_SPEC part 0B).
+
+    Process-wide, applied from the next sound on, surviving map loads. A
+    range of 0 or a run_chance below 0 means the skill table's value for
+    each nominated monster's own skill.
+    """
+    lib = _load()
+    lib.dqsim_set_hearing.argtypes = [ctypes.POINTER(_Hearing)]
+    settings = _Hearing(int(enabled), float(range), float(run_chance), int(player_noises))
+    _check(lib.dqsim_set_hearing(ctypes.byref(settings)))
+
+
+def hearing_for_skill(skill: int) -> tuple[float, float]:
+    """The hearing settings the skill table gives a Quake skill level (0-3).
+
+    Returns ``(range_units, run_chance)``; hearing is on and player noises
+    are off for every row of the table.
+    """
+    lib = _load()
+    lib.dqsim_hearing_for_skill.argtypes = [ctypes.c_int, ctypes.POINTER(_Hearing)]
+    out = _Hearing()
+    _check(lib.dqsim_hearing_for_skill(skill, ctypes.byref(out)))
+    return out.range, out.run_chance
+
+
 def load_map(name: str, *, skill: int = 1, seed: int = 0) -> None:
     """Load a map, seed the game's random numbers, and spawn the player."""
     _check(_load().dqsim_load_map(name.encode("ascii"), skill, seed & 0xFFFFFFFF))
@@ -479,6 +546,12 @@ def set_policy_hook(entity_index: int, policy) -> None:
                 for v in raw.visible[: raw.visible_count]
             ),
             attack_cooldown=float(raw.attack_cooldown),
+            start_health=float(raw.start_health),
+            heard=bool(raw.heard),
+            heard_kind=int(raw.heard_kind),
+            heard_relative=tuple(raw.heard_relative),
+            heard_age=float(raw.heard_age),
+            pace=int(raw.pace),
         )
         action = policy(observation)
         if action is not None:

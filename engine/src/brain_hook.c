@@ -267,6 +267,10 @@ static void hear_deliver(int kind, const vec3_t origin, const edict_t *emitter)
         float dy = origin[1] - ent->v.origin[1];
         float dz = origin[2] - ent->v.origin[2];
         float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (getenv("DQ_HEAR_DEBUG"))
+            fprintf(stderr, "DBGDEL kind=%d slot=%d dist=%.0f t=%.1f origin=%.0f/%.0f/%.0f\n",
+                    kind, slot->entity_index, distance, sv.time, origin[0], origin[1],
+                    origin[2]);
         if (distance > own.range)
             continue;
         if (slot->state.heard_valid) {
@@ -325,10 +329,11 @@ void dq_hear_write_byte(sizebuf_t *sb, int c)
             if (c == 23) /* svc_temp_entity */
                 hear_te_state = DQ_HEAR_TE_MARKER;
         } else if (hear_te_state == DQ_HEAR_TE_MARKER) {
-            if (c == 3 || c == 4) /* TE_EXPLOSION, TE_TAREXPLOSION */
+            if (c == 3 || c == 4) { /* TE_EXPLOSION, TE_TAREXPLOSION */
                 hear_te_state = DQ_HEAR_TE_KIND;
-            else
+            } else {
                 hear_te_state = DQ_HEAR_TE_NONE;
+            }
             hear_te_coords = 0;
         } else {
             hear_te_state = DQ_HEAR_TE_NONE;
@@ -979,6 +984,13 @@ static void hook_observe(const dq_hook_slot *slot, edict_t *ent, dqsim_hook_obse
         obs->heard_age = (float)(sv.time - slot->state.heard_time);
     }
     obs->pace = ent->v.enemy ? DQSIM_PACE_RUN : slot->state.pace;
+    if (obs->pace == DQSIM_PACE_RUN && ent->v.enemy) {
+        edict_t *e = PROG_TO_EDICT(ent->v.enemy);
+        int eidx = (int)(e - sv.edicts);
+        fprintf(stderr, "DBGPACE ent=%d enemy=%d (classname %s) state_pace=%d t=%.1f\n",
+                slot->entity_index, eidx, PR_GetString(e->v.classname), slot->state.pace,
+                sv.time);
+    }
 
     vec3_t eye;
     VectorAdd(ent->v.origin, ent->v.view_ofs, eye);
@@ -1076,6 +1088,9 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         for (int i = 0; i < obs->visible_count; i++)
             if ((obs->visible[i].flags & FL_CLIENT) && obs->visible[i].health > 0) {
                 ent->v.enemy = EDICT_TO_PROG(EDICT_NUM(obs->visible[i].index));
+                if (getenv("DQ_HEAR_DEBUG"))
+                    fprintf(stderr, "DBGENEMY ent=%d enemy=%d t=%.1f\n", slot->entity_index,
+                            obs->visible[i].index, sv.time);
                 break;
             }
     /* The pace the monster moves at now (RETRAIN_SPEC part 0B): with an

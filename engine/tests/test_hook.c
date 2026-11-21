@@ -245,10 +245,18 @@ static int driven_mode; /* 0 idle, 1 forward, 2 turn, 3 attack the player, 4 str
 static uint64_t throw_hash_clean, throw_hash_error;
 static int driven_calls;
 static int driven_saw_player;
+static int driven_saw_ever; /* 1 once a report has shown the player (0B tests) */
 static float driven_yaw;
 static float driven_origin[3];
 static float driven_turn_to;
 static float driven_side;
+/* The hearing fields the part 0B tests read from the driven monster's reports. */
+static int driven_heard;
+static int driven_heard_kind;
+static float driven_heard_relative[3];
+static float driven_heard_age;
+static float driven_cooldown;
+static int driven_pace;
 
 static void driven_policy(const dqsim_hook_observation *obs, dqsim_hook_action *action,
                           void *user)
@@ -261,6 +269,15 @@ static void driven_policy(const dqsim_hook_observation *obs, dqsim_hook_action *
     for (int i = 0; i < obs->visible_count; i++)
         if (obs->visible[i].flags & 8) /* FL_CLIENT */
             driven_saw_player = 1;
+    if (driven_saw_player)
+        driven_saw_ever = 1;
+    /* The hearing fields the part 0B tests read (RETRAIN_SPEC part 0B). */
+    driven_heard = (int)obs->heard;
+    driven_heard_kind = (int)obs->heard_kind;
+    memcpy(driven_heard_relative, obs->heard_relative, sizeof(driven_heard_relative));
+    driven_heard_age = obs->heard_age;
+    driven_cooldown = obs->attack_cooldown;
+    driven_pace = (int)obs->pace;
     action->desired_yaw = obs->angles[1];
     if (driven_mode == 1) {
         action->forward = 200.0f;
@@ -400,6 +417,7 @@ static int driven_start(const char *map, const char *classname, int *index)
     *index = entities[chosen].index;
     driven_calls = 0;
     driven_mode = 0;
+    driven_saw_ever = 0;
     CHECK(dqsim_set_policy_hook(*index, driven_policy, NULL) == DQSIM_OK,
           "nominate %s: %s", classname, dqsim_last_error());
     CHECK(freeze_monsters_except(*index) >= 8, "only %d other monsters to freeze on %s",
@@ -1685,6 +1703,1167 @@ static int shown_facing(void)
     return 0;
 }
 
+/* ------------------------------------------------------------------ *
+ * Hearing (RETRAIN_SPEC part 0B): what a nominated monster hears, the
+ * settings, the alert and its pace.
+ * ------------------------------------------------------------------ */
+
+static int speed_start_at(const char *map, const char *classname, int *index, int skip);
+
+/* The library defaults: on, the skill table's range and run chance, no
+ * player noises. Every hearing test starts from these, because the
+ * settings are process-wide and survive map loads. */
+static int hearing_defaults(void)
+{
+    const dqsim_hearing on = {1, 0.0f, -1.0f, 0};
+    CHECK(dqsim_set_hearing(&on) == DQSIM_OK, "hearing defaults: %s", dqsim_last_error());
+    return 0;
+}
+
+/* Put the player somewhere in [min_distance, max_distance] that is free and
+ * out of the monster's sight, and leave it there: the distances are tried
+ * nearest the ask first, 24 directions each. Returns 0 when no spot worked
+ * or any attempt was seen: a sighting gives the monster its enemy for the
+ * rest of the episode, so the caller starts over with a fresh load. */
+static int place_player_hidden(float min_distance, float max_distance)
+{
+    const dqsim_action idle = {0};
+    static const float spreads[5] = {0.0f, -50.0f, 50.0f, -100.0f, 100.0f};
+    driven_saw_ever = 0;
+    for (int s = 0; s < 5; s++) {
+        float d = (min_distance + max_distance) * 0.5f + spreads[s];
+        if (d < min_distance || d > max_distance)
+            continue;
+        for (int k = 0; k < 24; k++) {
+            if (!place_player_ahead(driven_origin, driven_yaw + (float)(k * 15 + 7), d))
+                continue;
+            driven_mode = 0;
+            for (int tick = 0; tick < 12; tick++) {
+                driven_saw_player = 0;
+                if (dqsim_step_repeat(&idle, 1) != DQSIM_OK)
+                    return 0;
+            }
+            if (!driven_saw_ever)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* The player fires its shotgun once. `yaw` is the blast's direction (the
+ * action's angles are absolute); `pitch` points it down where the pellets
+ * must not reach level monsters. */
+static int player_fire_at(float yaw, float pitch)
+{
+    const dqsim_action fire = {.buttons = DQSIM_BUTTON_ATTACK, .pitch = pitch, .yaw = yaw};
+    CHECK(dqsim_step_repeat(&fire, 1) == DQSIM_OK, "shot tick");
+    return 0;
+}
+
+static int player_fire(float pitch)
+{
+    return player_fire_at(0.0f, pitch);
+}
+
+/* driven_start, but the player starts inside [min_distance, max_distance],
+ * free and out of the monster's sight: the hearing tests' alert must arrive
+ * without a sighting, and from the clearest Grunt every direction may be
+ * either a wall or open sight. Tries each instance of the class, nearest
+ * the player's spawn first, and one hidden spot per instance. */
+static int hidden_start(const char *map, const char *classname, int *index, float min_distance,
+                        float max_distance)
+{
+    dqsim_player_state player;
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+    static const float spreads[5] = {0.0f, -50.0f, 50.0f, -100.0f, 100.0f};
+
+    CHECK(dqsim_load_map(map, 2, 23) == DQSIM_OK, "load %s", map);
+    /* The search teleports the player around the level before anything is
+     * frozen: make it untargetable first, or a level monster shoots it dead
+     * mid-search and every later fire is a dead player's silent click. The
+     * hook still sees a notarget player (the sight probe is built on that). */
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    const dqsim_action settle = {0};
+    CHECK(dqsim_step_repeat(&settle, 2) == DQSIM_OK, "notarget tick");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "get player");
+    int count = dqsim_get_entities(entities, 2048);
+    CHECK(count > 0, "get entities");
+    driven_calls = 0;
+    driven_mode = 0;
+    driven_saw_ever = 0;
+    float spawn[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    int taken[2048];
+    memset(taken, 0, sizeof(taken));
+    for (int round = 0; round < count; round++) {
+        /* the nearest untried instance of the class, skipping the first
+         * `skip` accepted ones for a caller that retries */
+        int pick = -1;
+        float best = 1e30f;
+        for (int i = 0; i < count; i++) {
+            if (taken[i] || strcmp(entities[i].classname, classname) != 0)
+                continue;
+            float dx = entities[i].origin[0] - spawn[0], dy = entities[i].origin[1] - spawn[1];
+            float d = dx * dx + dy * dy;
+            if (d < best) {
+                best = d;
+                pick = i;
+            }
+        }
+        if (pick < 0)
+            break;
+        taken[pick] = 1;
+        int idx = entities[pick].index;
+        if (dqsim_set_policy_hook(idx, driven_policy, NULL) != DQSIM_OK)
+            continue;
+        driven_saw_ever = 0; /* per candidate: a sighting spoils only its own instance */
+        int placed = 0;
+        for (int s = 0; s < 5 && !placed; s++) {
+            float d = (min_distance + max_distance) * 0.5f + spreads[s];
+            if (d < min_distance || d > max_distance)
+                continue;
+            for (int k = 0; k < 24; k++) {
+                if (!place_player_ahead(entities[pick].origin,
+                                        entities[pick].yaw + (float)(k * 15 + 7), d))
+                    continue;
+                driven_mode = 0;
+                for (int tick = 0; tick < 12; tick++) {
+                    driven_saw_player = 0;
+                    if (dqsim_step_repeat(&idle, 1) != DQSIM_OK)
+                        return 1;
+                }
+                if (!driven_saw_ever) {
+                    /* ... and alive: a spot above a long drop leaves the
+                     * player dead at the floor, and a dead player's weapon
+                     * is a silent click. */
+                    dqsim_player_state settled;
+                    CHECK(dqsim_get_player(&settled) == DQSIM_OK, "settled player");
+                    if (settled.health < 95.0f || !settled.on_ground)
+                        continue; /* mid-air over a drop: the player keeps falling */
+                    /* No monster within pellet range either: the tests fire
+                     * the shotgun here, and a pellet hurting a level monster
+                     * cries over the shot's own noise. */
+                    float spot[3];
+                    memcpy(spot, driven_origin, sizeof(spot));
+                    int crowded = 0;
+                    int n = dqsim_get_entities(entities, 2048);
+                    for (int i = 0; i < n && !crowded; i++) {
+                        if (!(entities[i].flags & 32) || entities[i].index == idx)
+                            continue;
+                        float dx = entities[i].origin[0] - spot[0];
+                        float dy = entities[i].origin[1] - spot[1];
+                        if (dx * dx + dy * dy < 120.0f * 120.0f)
+                            crowded = 1;
+                    }
+                    if (!crowded) {
+                        placed = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!placed) {
+            CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+            continue;
+        }
+        CHECK(freeze_monsters_except(idx) >= 8, "only %d other monsters to freeze on %s",
+              frozen_monsters, map);
+        *index = idx;
+        CHECK(driven_calls > 10, "the %s was asked for %d decisions in 1 s", classname,
+              driven_calls);
+        return 0;
+    }
+    return 1;
+}
+
+/* Is the heard noise where `origin` was, minus the monster's origin, within
+ * `tolerance` units on every axis? */
+static int heard_marks(const float origin[3], const float monster[3], float tolerance)
+{
+    float want[3] = {origin[0] - monster[0], origin[1] - monster[1], origin[2] - monster[2]};
+    return fabsf(driven_heard_relative[0] - want[0]) <= tolerance &&
+           fabsf(driven_heard_relative[1] - want[1]) <= tolerance &&
+           fabsf(driven_heard_relative[2] - want[2]) <= tolerance;
+}
+
+/* 1 of 12: the shot is heard through walls, at where it was fired, and the
+ * heard position does not follow the player afterwards. */
+static int hearing_gunfire(void)
+{
+    fprintf(stderr, "== hearing_gunfire\n");
+
+    const dqsim_action idle = {0};
+    dqsim_entity self;
+    dqsim_player_state player;
+    int index;
+    hearing_defaults();
+    if (hidden_start("e1m1", "monster_army", &index, 350.0f, 450.0f))
+        return 1;
+
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player before the shot");
+    float shot_origin[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    player_fire(0.0f);
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    {
+        dqsim_player_state dbg;
+        dqsim_get_player(&dbg);
+        fprintf(stderr, "DBG fire: heard=%d kind=%d player_hp=%.0f calls=%d spot=%.0f/%.0f/%.0f\n",
+                driven_heard, driven_heard_kind, dbg.health, driven_calls, shot_origin[0],
+                shot_origin[1], shot_origin[2]);
+    }
+    CHECK(driven_heard == 1, "the Grunt did not hear the shot");
+    CHECK(driven_heard_kind == DQSIM_NOISE_GUNFIRE, "heard kind %d, not gunfire",
+          driven_heard_kind);
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    /* 3, not 2: the player settles one physics step inside the shot tick
+     * (measured: exactly 2 units of z); the shot's spot is what is checked,
+     * and a wrong noise would be off by hundreds. */
+    CHECK(heard_marks(shot_origin, self.origin, 3.0f),
+          "heard at (%.1f, %.1f, %.1f), not at the shot (%.1f, %.1f, %.1f)",
+          driven_heard_relative[0], driven_heard_relative[1], driven_heard_relative[2],
+          shot_origin[0] - self.origin[0], shot_origin[1] - self.origin[1],
+          shot_origin[2] - self.origin[2]);
+
+    /* The player moves 200 units: the heard position stays where the shot
+     * was (decision 3). */
+    int moved = 0;
+    for (int k = 0; k < 8 && !moved; k++) {
+        float rad = (float)k * 3.14159265f / 4.0f;
+        float spot[3] = {shot_origin[0] + cosf(rad) * 200.0f,
+                         shot_origin[1] + sinf(rad) * 200.0f, shot_origin[2]};
+        if (dqsim_teleport_player(spot, 0.0f) == DQSIM_OK)
+            moved = 1;
+    }
+    CHECK(moved, "no free spot 200 units from the shot");
+    CHECK(dqsim_step_repeat(&idle, 3) == DQSIM_OK, "decision 3");
+    CHECK(driven_heard == 1, "the heard noise vanished after the move");
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(heard_marks(shot_origin, self.origin, 3.0f),
+          "the heard position followed the player: (%.1f, %.1f, %.1f)",
+          driven_heard_relative[0], driven_heard_relative[1], driven_heard_relative[2]);
+    printf("hearing: gunfire heard at the shot's origin, position kept after the player moved\n");
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* 2 of 12: the range setting is the monster's own; 400 is heard, 700 is not,
+ * with the range at 500. */
+static int hearing_range(void)
+{
+    fprintf(stderr, "== hearing_range\n");
+
+    const dqsim_action idle = {0};
+    dqsim_player_state player;
+    int index;
+    if (hidden_start("e1m1", "monster_army", &index, 350.0f, 450.0f))
+        return 1;
+    const dqsim_hearing short_range = {1, 500.0f, -1.0f, 0};
+    CHECK(dqsim_set_hearing(&short_range) == DQSIM_OK, "range 500: %s", dqsim_last_error());
+    CHECK(place_player_hidden(350.0f, 450.0f), "no hidden spot 350-450 units out");
+
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player before the 400 shot");
+    float near_origin[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    player_fire(0.0f);
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    CHECK(driven_heard == 1 && driven_heard_kind == DQSIM_NOISE_GUNFIRE,
+          "a shot 400 units away was not heard with the range at 500");
+
+    /* The noise is remembered for 10 s; let it expire before the far shot. */
+    CHECK(dqsim_step_repeat(&idle, 72 * 11) == DQSIM_OK, "let the noise expire");
+    CHECK(driven_heard == 0, "the noise was not forgotten after 11 s (age %.1f)",
+          driven_heard_age);
+    CHECK(place_player_hidden(600.0f, 800.0f), "no hidden spot 600-800 units out");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player before the 700 shot");
+    float far_origin[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    player_fire(0.0f);
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    /* A level hazard's cry can land meanwhile; what must not happen is the
+     * shot itself being heard at the player. */
+    dqsim_entity self;
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(!(driven_heard && driven_heard_kind == DQSIM_NOISE_GUNFIRE &&
+            heard_marks(far_origin, self.origin, 3.0f)),
+          "a shot 700 units away was heard with the range at 500");
+    printf("hearing: range 500 hears 400, not 700\n");
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    (void)near_origin;
+    return 0;
+}
+
+/* 3 of 12: hearing off, nothing is heard; back on, it is. */
+static int hearing_switch(void)
+{
+    fprintf(stderr, "== hearing_switch\n");
+
+    const dqsim_action idle = {0};
+    dqsim_player_state player;
+    int index;
+    if (hidden_start("e1m1", "monster_army", &index, 350.0f, 450.0f))
+        return 1; /* 250-350 admits no settled spot on e1m1's Grunts (measured) */
+    /* The placement can have left a noise remembered, and e1m1's hazards
+     * cry while it waits: poll for the quiet second. */
+    for (int t = 0; t < 72 * 20 && driven_heard; t++)
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "quiet poll");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player before the off shot");
+    float shot_origin[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    const dqsim_hearing off = {0, 0.0f, -1.0f, 0};
+    CHECK(dqsim_set_hearing(&off) == DQSIM_OK, "hearing off: %s", dqsim_last_error());
+    player_fire(0.0f); /* EXPERIMENT */
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    dqsim_entity self;
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(!(driven_heard && driven_heard_kind == DQSIM_NOISE_GUNFIRE &&
+            heard_marks(shot_origin, self.origin, 3.0f)),
+          "a shot was heard at the player with hearing off");
+    hearing_defaults();
+    CHECK(dqsim_step_repeat(&idle, 44) == DQSIM_OK, "shotgun refire");
+    player_fire(0.0f); /* EXPERIMENT */
+
+    /* The shot's noise arrives within a tick or two; a world cry can land
+     * right after it, so look for the shot per tick instead of judging the
+     * last report. */
+    int heard_again = 0;
+    for (int t = 0; t < 12 && !heard_again; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "on settle");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player after the on shot");
+        float spot2[3] = {player.origin[0], player.origin[1], player.origin[2]};
+        dqsim_entity self2;
+        CHECK(driven_entity(index, &self2), "the Grunt is gone");
+        if (driven_heard && driven_heard_kind == DQSIM_NOISE_GUNFIRE &&
+            heard_marks(spot2, self2.origin, 3.0f))
+            heard_again = 1;
+    }
+    CHECK(heard_again, "a shot was not heard with hearing back on");
+    printf("hearing: the switch silences and restores\n");
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* 4 of 12: the rocket's temp-entity explosion is heard, at where it went
+ * off, far from the player. The player fires AWAY from the Grunt, at a wall
+ * behind it: a rocket aimed at the Grunt kills it outright (100 damage on
+ * 30 health), and a dead monster hears nothing (RETRAIN_SPEC part 0B: fires
+ * at a wall at least 250 units from itself, within range of the Grunt). */
+static int hearing_explosion(void)
+{
+    fprintf(stderr, "== hearing_explosion\n");
+
+    const dqsim_action idle = {0};
+    dqsim_player_state player;
+    int index;
+    hearing_defaults();
+    if (driven_start("e1m1", "monster_army", &index))
+        return 1;
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "notarget tick");
+    /* Impulses travel in the usercmd, not as console commands: an
+     * "impulse 9" console line is an unknown server command (measured). */
+    const dqsim_action arm_all = {.impulse = 9};
+    const dqsim_action arm_rl = {.impulse = 7};
+    CHECK(dqsim_step_repeat(&arm_all, 1) == DQSIM_OK, "impulse 9");
+    CHECK(dqsim_step_repeat(&arm_rl, 1) == DQSIM_OK, "impulse 7");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "arm the player");
+
+    /* Up to three visible spots: fire away from the Grunt at whatever wall
+     * is behind, and take the first explosion it hears. */
+    int exploded = 0;
+    float explosion_origin[3] = {0.0f, 0.0f, 0.0f}, player_origin[3] = {0.0f, 0.0f, 0.0f};
+    for (int attempt = 0; attempt < 3 && !exploded; attempt++) {
+        int placed = 0;
+        for (int k = 0; k < 24 && !placed; k++) {
+            float yaw = driven_yaw + (float)(k * 15 + 7) + (float)(attempt * 5);
+            if (!place_player_ahead(driven_origin, yaw, 300.0f))
+                continue;
+            driven_mode = 0;
+            for (int tick = 0; tick < 12; tick++) {
+                driven_saw_player = 0;
+                CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "place tick");
+            }
+            if (driven_saw_player)
+                placed = 1;
+        }
+        CHECK(placed, "no visible spot 300 units out");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "placed player");
+        memcpy(player_origin, player.origin, sizeof(player_origin));
+        CHECK(player.health >= 95.0f, "the player is hurt (%.0f): no clear shot", player.health);
+        dqsim_entity self;
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        if (self.health <= 0.0f)
+            return 1; /* a stray rocket killed it: this attempt is meaningless */
+        float away = atan2f(player_origin[1] - self.origin[1],
+                            player_origin[0] - self.origin[0]) * 180.0f / 3.14159265f;
+        for (int tick = 0; tick < 72 * 3 && !exploded; tick++) {
+            const dqsim_action shoot = {.buttons = DQSIM_BUTTON_ATTACK, .yaw = away};
+            CHECK(dqsim_step_repeat(&shoot, 1) == DQSIM_OK, "rocket tick");
+            CHECK(driven_entity(index, &self), "the Grunt is gone");
+            CHECK(self.health > 0.0f, "the Grunt died before hearing an explosion");
+            if (driven_heard_kind == DQSIM_NOISE_EXPLOSION && driven_heard) {
+                explosion_origin[0] = self.origin[0] + driven_heard_relative[0];
+                explosion_origin[1] = self.origin[1] + driven_heard_relative[1];
+                explosion_origin[2] = self.origin[2] + driven_heard_relative[2];
+                float dx2 = explosion_origin[0] - player_origin[0];
+                float dy2 = explosion_origin[1] - player_origin[1];
+                if (sqrtf(dx2 * dx2 + dy2 * dy2) >= 200.0f)
+                    exploded = 1; /* far enough; a nearer wall is re-placed below */
+                break;
+            }
+        }
+    }
+    CHECK(exploded, "no explosion at least 200 units out was heard in 9 s of rockets");
+    float dx = explosion_origin[0] - player_origin[0], dy = explosion_origin[1] - player_origin[1];
+    float distance = sqrtf(dx * dx + dy * dy);
+    CHECK(distance >= 200.0f, "the explosion was only %.0f units from the player", distance);
+    printf("hearing: explosion heard %.0f units from the shooter\n", distance);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* 5 of 12: a Grunt's pain and death cries are heard, at the victim, once
+ * while it lives and once on its death. The victim stays frozen: the hook
+ * only takes the decision thinks, and pain and death run under QuakeC as
+ * usual, so its cries play. */
+static int hearing_cries(void)
+{
+    const dqsim_action idle = {0};
+    static dqsim_entity entities[2048];
+    dqsim_entity self;
+    int index;
+    if (driven_start("e1m1", "monster_army", &index))
+        return 1;
+    hearing_defaults();
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+
+    /* The victim: a monster_army 300-900 units from the driven one (in
+     * hearing range, on another room's far side). */
+    int count = dqsim_get_entities(entities, 2048);
+    int victim_index = -1;
+    float victim_origin[3] = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < count && victim_index < 0; i++) {
+        if (entities[i].index == index || strcmp(entities[i].classname, "monster_army") != 0)
+            continue;
+        float dx = entities[i].origin[0] - self.origin[0];
+        float dy = entities[i].origin[1] - self.origin[1];
+        float d = sqrtf(dx * dx + dy * dy);
+        if (d >= 300.0f && d <= 900.0f) {
+            victim_index = entities[i].index;
+            memcpy(victim_origin, entities[i].origin, sizeof(victim_origin));
+        }
+    }
+    CHECK(victim_index > 0, "e1m1 has no second Grunt in hearing range");
+
+    /* The player beside the victim, out of the driven Grunt's sight, facing
+     * it: one offset that is free and unseen. */
+    int placed = 0;
+    float fire_yaw = 0.0f;
+    for (int k = 0; k < 8 && !placed; k++) {
+        float rad = (float)k * 3.14159265f / 4.0f;
+        float spot[3] = {victim_origin[0] + cosf(rad) * 48.0f,
+                         victim_origin[1] + sinf(rad) * 48.0f,
+                         victim_origin[2] + 24.0f};
+        float to_victim = atan2f(victim_origin[1] - spot[1],
+                                 victim_origin[0] - spot[0]) * 180.0f / 3.14159265f;
+        if (dqsim_teleport_player(spot, to_victim) != DQSIM_OK)
+            continue;
+        /* The victim must be in the player's fire line: a ray at the victim's
+         * yaw reaches its distance. */
+        float dist = sqrtf((victim_origin[0] - spot[0]) * (victim_origin[0] - spot[0]) +
+                           (victim_origin[1] - spot[1]) * (victim_origin[1] - spot[1]));
+        float distances[24];
+        unsigned char kinds[24];
+        CHECK(dqsim_ray_fan((float[]){0.0f}, 1, 24, 768.0f, distances, kinds) == DQSIM_OK,
+              "player rays");
+        /* The player faces the victim: its centre ray must reach the
+         * victim's distance. */
+        int los = distances[0] * 768.0f >= dist - 16.0f;
+        if (!los)
+            continue;
+        driven_saw_ever = 0;
+        driven_mode = 0;
+        for (int tick = 0; tick < 12; tick++)
+            dqsim_step_repeat(&idle, 1);
+        /* The cry and the shot land in the same tick, and the nearer wins:
+         * the player must be FARTHER from the driven Grunt than the victim
+         * is, or its own gunshot masks every cry. */
+        float gp = sqrtf((spot[0] - self.origin[0]) * (spot[0] - self.origin[0]) +
+                         (spot[1] - self.origin[1]) * (spot[1] - self.origin[1]));
+        float gv = sqrtf((victim_origin[0] - self.origin[0]) * (victim_origin[0] - self.origin[0]) +
+                         (victim_origin[1] - self.origin[1]) * (victim_origin[1] - self.origin[1]));
+        if (!driven_saw_ever && gp > gv + 24.0f) {
+            placed = 1;
+            fire_yaw = to_victim;
+        }
+    }
+    CHECK(placed, "no spot beside the victim is out of the driven Grunt's sight and "
+                  "farther than the victim");
+
+    /* Fire until the victim dies; a cry is heard at the victim's position
+     * while it lives (pain) and once on its death. The fire carries its yaw:
+     * the action's angles are absolute, and a buttons-only action snaps the
+     * view to yaw 0 (measured). */
+    int pain_seen = 0, death_seen = 0;
+    int kinds_heard[8] = {0};
+    /* One shot per burst, then a pause: the player's own shot is a noise
+     * that overwrites the cries (most recent wins), so the cry of a shot
+     * shows only in the pause right after it. */
+    for (int burst = 0; burst < 30 && !death_seen; burst++) {
+        const dqsim_action fire = {.buttons = DQSIM_BUTTON_ATTACK, .yaw = fire_yaw};
+        CHECK(dqsim_step_repeat(&fire, 1) == DQSIM_OK, "shot at the victim");
+        /* Read right after the shot: the cry of this shot is the most
+         * recent noise for the first half-second, and the next shot
+         * overwrites it. */
+        for (int tick = 0; tick < 24; tick++) {
+            CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "pause tick");
+            if (driven_heard) {
+                CHECK(driven_heard_kind >= 0 && driven_heard_kind < 8,
+                      "kind %d out of range", driven_heard_kind);
+                kinds_heard[driven_heard_kind]++;
+                CHECK(driven_entity(index, &self), "the Grunt is gone");
+                if (driven_heard_kind == DQSIM_NOISE_CRY &&
+                    heard_marks(victim_origin, self.origin, 3.0f)) {
+                    /* The victim is gone or gone-corpse: which cry was this? */
+                    int alive = 0;
+                    int n = dqsim_get_entities(entities, 2048);
+                    for (int i = 0; i < n; i++)
+                        if (entities[i].index == victim_index && entities[i].health > 0.0f)
+                            alive = 1;
+                    if (alive)
+                        pain_seen = 1;
+                    else
+                        death_seen = 1;
+                }
+            }
+        }
+        CHECK(dqsim_step_repeat(&idle, 24) == DQSIM_OK, "refire wait");
+    }
+    CHECK(pain_seen, "no pain cry was heard while the victim lived");
+    CHECK(death_seen, "no death cry was heard");
+    printf("hearing: cries heard by kind - gunfire %d, explosion %d, cry %d, player %d; "
+           "pain %s, death %s\n",
+           kinds_heard[1], kinds_heard[2], kinds_heard[3], kinds_heard[4],
+           pain_seen ? "yes" : "no", death_seen ? "yes" : "no");
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* 6 of 12: the player's own sounds count only with player_noises on. */
+/* 6 of 12: the player's own sounds count only with player_noises on. */
+static int hearing_player_noises(void)
+{
+    fprintf(stderr, "== hearing_player_noises\n");
+
+    const dqsim_action idle = {0};
+    dqsim_player_state player;
+    int index;
+    hearing_defaults();
+    if (hidden_start("e1m1", "monster_army", &index, 350.0f, 450.0f))
+        return 1; /* 150-250 admits no settled spot on e1m1's Grunts (measured);
+                     the jump is heard within 1000 either way */
+    /* As in hearing_switch: any placement-phase noise expires first, and
+     * level hazards may cry meanwhile - poll for the quiet second. */
+    for (int t = 0; t < 72 * 20 && driven_heard; t++)
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "quiet poll");
+
+    const dqsim_action jump = {.buttons = DQSIM_BUTTON_JUMP};
+    CHECK(dqsim_step_repeat(&jump, 6) == DQSIM_OK, "jump");
+    CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "land");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player after the jump");
+    float jump_spot[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    dqsim_entity self;
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(!(driven_heard && driven_heard_kind == DQSIM_NOISE_PLAYER &&
+            heard_marks(jump_spot, self.origin, 3.0f)),
+          "the player's jump was heard with player_noises off");
+
+    const dqsim_hearing noisy = {1, 0.0f, -1.0f, 1};
+    CHECK(dqsim_set_hearing(&noisy) == DQSIM_OK, "player noises on: %s", dqsim_last_error());
+    /* The hearing-on check needs the noise fresh: jump again after any
+     * stray noise has passed (the noise from this jump is the one judged). */
+    CHECK(dqsim_step_repeat(&jump, 6) == DQSIM_OK, "jump again");
+    CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "land again");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player after the second jump");
+    float jump_spot2[3] = {player.origin[0], player.origin[1], player.origin[2]};
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    CHECK(driven_heard == 1 && driven_heard_kind == DQSIM_NOISE_PLAYER &&
+              heard_marks(jump_spot2, self.origin, 3.0f),
+          "the player's jump was not heard as a player noise (kind %d)", driven_heard_kind);
+    printf("hearing: the player's jump is heard only with player_noises on\n");
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    hearing_defaults();
+    return 0;
+}
+
+/* 7 of 12: the investigation pace - walk frames advanced by distance, at
+ * half the run speed - and the run pace at run chance 1. */
+/* One attempt of test 7 on candidate number `skip`. Returns 0 when the
+ * measurements were taken, 1 when the episode was spoilt (the walk opened
+ * the sight and handed the Grunt its enemy: the alert cannot test a pace
+ * then) and the caller retries on the next candidate. */
+static int investigate_attempt(int skip, float *out_walk_per_100, float *out_inv_speed,
+                               float *out_run_speed, float *out_inv_per_100)
+{
+    const dqsim_action idle = {0};
+    dqsim_entity self;
+    int index;
+    if (speed_start_at("e1m2", "monster_army", &index, skip))
+        return 2; /* no usable candidate at this skip: a hard stop */
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "notarget tick");
+    /* The alert's pace must roll at chance 0: any noise the placement
+     * makes would otherwise start the alert at the table's 0.5. */
+    {
+        const dqsim_hearing investigate = {1, 0.0f, 0.0f, 0};
+        CHECK(dqsim_set_hearing(&investigate) == DQSIM_OK, "run chance 0: %s",
+              dqsim_last_error());
+    }
+    driven_saw_ever = 0;
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+
+    /* The stock walk's figure: drive forward and count the frame changes
+     * per 100 units. A walk that opens the sight spoils the episode. */
+    float last[3];
+    memcpy(last, self.origin, sizeof(last));
+    int walk_changes = 0;
+    float walk_units = 0.0f;
+    float walk_frame = self.frame;
+    driven_mode = 1;
+    for (int t = 0; t < 144; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "walk tick");
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        float step = flat_distance(self.origin, last);
+        memcpy(last, self.origin, sizeof(last));
+        walk_units += step;
+        if (self.frame != walk_frame) {
+            walk_changes++;
+            walk_frame = self.frame;
+        }
+        if (step > 0.0f)
+            CHECK(self.frame >= 90 && self.frame <= 113, "walk tick %d shows frame %d", t,
+                  self.frame);
+        if (driven_saw_ever) {
+        }
+        if (self.health < 30.0f) {
+            return 1; /* the walk led into a level hazard: retry elsewhere */
+        }
+    }
+    if (walk_units < 15.0f) {
+    }
+
+    /* The alert: a shot from the hidden spot, into the floor at the
+     * player's feet - the sound carries, and no level monster is hurt (a
+     * hurt monster cries, and its return fire refreshes the noise
+     * forever). The monster stands while it fires. */
+    driven_mode = 0;
+    player_fire(45.0f);
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    if (driven_saw_ever) {
+        return 1; /* the falling player opened the sight: retry elsewhere */
+    }
+    if (driven_pace != DQSIM_PACE_INVESTIGATE) {
+    }
+
+    /* Investigate: walk frames advanced by distance, at half the run speed. */
+    int inv_changes = 0;
+    float inv_units = 0.0f, inv_fastest = 0.0f, inv_frame = self.frame;
+    float run_speed = 0.0f;
+    memcpy(last, self.origin, sizeof(last));
+    driven_mode = 1;
+    for (int t = 0; t < 72; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "investigate tick");
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        float step = flat_distance(self.origin, last);
+        memcpy(last, self.origin, sizeof(last));
+        inv_units += step;
+        if (step > inv_fastest)
+            inv_fastest = step;
+        if (self.frame != inv_frame) {
+            inv_changes++;
+            inv_frame = self.frame;
+        }
+        if (step > 0.0f)
+            CHECK(self.frame >= 90 && self.frame <= 113,
+                  "investigate tick %d shows frame %d, not a walk frame", t, self.frame);
+        if (driven_pace != DQSIM_PACE_INVESTIGATE) {
+        }
+        if (driven_saw_ever) {
+        }
+        if (self.health < 30.0f) {
+            return 1; /* the drive led into a level hazard: retry elsewhere */
+        }
+    }
+    if (inv_units < 20.0f) {
+    }
+
+    /* Run chance 1: the same alert gives the run frames and the run pace,
+     * after the first alert's noise has been forgotten. The player stays
+     * hidden: once alert_driven hands the monster its enemy, the pace reads
+     * RUN whatever the alert rolled. */
+    /* The first alert's noise expires under deaf hearing: with hearing on,
+     * every stray noise re-rolls the alert at the current chance. */
+    {
+        const dqsim_hearing deaf = {0, 0.0f, -1.0f, 0};
+        CHECK(dqsim_set_hearing(&deaf) == DQSIM_OK, "hearing off: %s", dqsim_last_error());
+    }
+    driven_mode = 0; /* the wait must not walk the monster into a hazard */
+    int calls_at_start = driven_calls;
+    for (int t = 0; t < 72 * 20 && driven_pace != DQSIM_PACE_WALK; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "quiet poll");
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        if (self.health < 30.0f) {
+            return 1; /* standing in a hazard: retry elsewhere */
+        }
+        if (driven_calls == calls_at_start) {
+            return 1; /* the monster's decisions stopped: retry elsewhere */
+        }
+        calls_at_start = driven_calls;
+    }
+    CHECK(driven_pace == DQSIM_PACE_WALK, "the pace did not return to walk in 20 s");
+    const dqsim_hearing always_run = {1, 0.0f, 1.0f, 0};
+    CHECK(dqsim_set_hearing(&always_run) == DQSIM_OK, "run chance 1: %s", dqsim_last_error());
+    CHECK(driven_pace == DQSIM_PACE_WALK, "the pace did not return to walk in 20 s");
+    CHECK(place_player_hidden(600.0f, 900.0f), "no hidden spot for the second alert");
+    player_fire(45.0f); /* into the floor, as the first alert */
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    CHECK(driven_pace == DQSIM_PACE_RUN, "the alert pace is %d, not run", driven_pace);
+    CHECK(driven_entity(index, &self), "the Grunt is gone");
+    memcpy(last, self.origin, sizeof(last));
+    driven_mode = 1; /* the run frames show on ticks the monster really moves */
+    for (int t = 0; t < 24; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "alerted run tick");
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        float step = flat_distance(self.origin, last);
+        memcpy(last, self.origin, sizeof(last));
+        /* 0.5, not 0: a closing door can push the standing monster a
+         * fraction of a unit, and the stand frame it shows is not the
+         * alert's doing. A real drive step is 1.5 units at run speed. */
+        if (step > 0.5f)
+            CHECK(self.frame >= 73 && self.frame <= 80,
+                  "alerted run tick %d shows frame %d, not a run frame", t, self.frame);
+    }
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    hearing_defaults();
+
+    /* The run speed, measured in a fresh episode: the previous phases may
+     * have walked the monster into a corner, and alert_driven's sighting
+     * hands it an enemy, so this is last and on its own load. */
+    if (driven_start("e1m2", "monster_army", &index))
+        return 2;
+    {
+        const dqsim_action idle2 = {0};
+        CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+        CHECK(dqsim_step_repeat(&idle2, 2) == DQSIM_OK, "notarget tick");
+        /* A targeted placement: alert_driven's blind fan leaves the player
+         * standing on e1m2's hazards, and a dead player restarts the level
+         * under the measurement. */
+        int placed2 = 0;
+        for (int k = 0; k < 24 && !placed2; k++) {
+            if (!place_player_ahead(driven_origin, driven_yaw + (float)(k * 15 + 7), 200.0f))
+                continue;
+            int alive = 1;
+            for (int tick = 0; tick < 24; tick++) {
+                driven_saw_player = 0;
+                CHECK(dqsim_step_repeat(&idle2, 1) == DQSIM_OK, "place tick");
+                dqsim_player_state p1;
+                CHECK(dqsim_get_player(&p1) == DQSIM_OK, "player during the settle");
+                if (p1.health < 95.0f) {
+                    alive = 0; /* a hazard is eating the player: leave now,
+                                  before a death restarts the level */
+                    break;
+                }
+            }
+            if (alive && driven_saw_player)
+                placed2 = 1;
+        }
+        CHECK(placed2, "no safe visible spot in the Grunt's sight");
+        CHECK(driven_entity(index, &self), "the Grunt is gone");
+        driven_mode = 1;
+        float run_units = 0.0f, run_fastest = 0.0f;
+        memcpy(last, self.origin, sizeof(last));
+        for (int t = 0; t < 144; t++) {
+            CHECK(dqsim_step_repeat(&idle2, 1) == DQSIM_OK, "run tick");
+            CHECK(driven_entity(index, &self), "the Grunt is gone");
+            float step = flat_distance(self.origin, last);
+            memcpy(last, self.origin, sizeof(last));
+            run_units += step;
+            if (step > run_fastest)
+                run_fastest = step;
+        }
+        run_speed = run_fastest * 72.0f;
+        CHECK(run_units > 30.0f, "the Grunt covered %.0f units running", run_units);
+    }
+    float inv_speed = inv_fastest * 72.0f;
+    CHECK(inv_speed > 0.45f * run_speed && inv_speed < 0.55f * run_speed,
+          "investigating at %.1f units/s, not half of %.1f", inv_speed, run_speed);
+    float walk_per_100 = 100.0f * (float)walk_changes / walk_units;
+    float inv_per_100 = 100.0f * (float)inv_changes / inv_units;
+    CHECK(inv_per_100 > 0.85f * walk_per_100 && inv_per_100 < 1.15f * walk_per_100,
+          "frame changes per 100 units: investigate %.1f, stock walk %.1f", inv_per_100,
+          walk_per_100);
+
+    printf("hearing: investigate at %.1f u/s (half of %.1f), frames per 100 units %.1f vs walk %.1f\n",
+           inv_speed, run_speed, inv_per_100, walk_per_100);
+    *out_walk_per_100 = walk_per_100;
+    *out_inv_speed = inv_speed;
+    *out_run_speed = run_speed;
+    *out_inv_per_100 = inv_per_100;
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    hearing_defaults();
+    return 0;
+}
+
+static int investigate_pace(void)
+{
+    fprintf(stderr, "== investigate_pace\n");
+
+    hearing_defaults();
+    float walk_per_100 = 0.0f, inv_speed = 0.0f, run_speed = 0.0f, inv_per_100 = 0.0f;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int outcome = investigate_attempt(attempt, &walk_per_100, &inv_speed, &run_speed,
+                                          &inv_per_100);
+        if (outcome == 0)
+            return 0;
+        if (outcome == 2)
+            break; /* no usable candidate left: fall through to the failure */
+        CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook between attempts");
+        hearing_defaults();
+    }
+    CHECK(0, "no attempt of the investigation pace survived a full episode");
+    return 1;
+}
+
+/* 8 of 12: the alert's pace is drawn from the seeded stream: 20 alerts in a
+ * row give both paces, and the same load seed gives the same sequence. */
+static int alert_pace_seeded(void)
+{
+    fprintf(stderr, "== alert_pace_seeded\n");
+
+    const dqsim_action idle = {0};
+    int index;
+    int paces[2][20];
+    for (int run = 0; run < 2; run++) {
+        if (hidden_start("e1m1", "monster_army", &index, 350.0f, 450.0f))
+            return 1;
+        const dqsim_hearing half = {1, 0.0f, 0.5f, 0};
+        CHECK(dqsim_set_hearing(&half) == DQSIM_OK, "run chance 0.5: %s", dqsim_last_error());
+        for (int alert = 0; alert < 20; alert++) {
+            player_fire(0.0f);
+            CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+            CHECK(driven_pace == DQSIM_PACE_RUN || driven_pace == DQSIM_PACE_INVESTIGATE,
+                  "alert %d rolled pace %d", alert, driven_pace);
+            paces[run][alert] = driven_pace;
+            /* Let the noise be forgotten, then alert again. */
+            CHECK(dqsim_step_repeat(&idle, 72 * 11) == DQSIM_OK, "forget the noise");
+            CHECK(driven_pace == DQSIM_PACE_WALK, "the pace did not end with the noise");
+        }
+        CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+        hearing_defaults();
+    }
+    int saw[2] = {0, 0};
+    for (int alert = 0; alert < 20; alert++) {
+        if (paces[0][alert] == DQSIM_PACE_RUN)
+            saw[0] = 1;
+        else
+            saw[1] = 1;
+        CHECK(paces[0][alert] == paces[1][alert],
+              "alert %d rolled %d then %d for the same load seed", alert, paces[0][alert],
+              paces[1][alert]);
+    }
+    CHECK(saw[0] && saw[1], "20 alerts rolled only one pace");
+    printf("hearing: 20 alerts gave both paces, the same sequence twice\n");
+    return 0;
+}
+
+/* 9 of 12: the hearing state is in the snapshot and the hash: a restore
+ * replays identically, and with hearing off the replay diverges at the
+ * second shot. */
+static int hearing_snapshot_replay(void)
+{
+    fprintf(stderr, "== hearing_snapshot_replay\n");
+
+    const dqsim_action idle = {0};
+    int index;
+    hearing_defaults();
+    if (hidden_start("e1m1", "monster_army", &index, 350.0f, 450.0f))
+        return 1;
+    player_fire(0.0f);
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    CHECK(driven_heard == 1, "the alert shot was not heard");
+
+    dqsim_snapshot *snap = NULL;
+    CHECK(dqsim_snapshot_save(&snap) == DQSIM_OK, "save the snapshot: %s", dqsim_last_error());
+
+    static uint64_t hashes[144];
+    for (int t = 0; t < 144; t++) {
+        if (t == 50)
+            player_fire(0.0f); /* the second shot, in the window */
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "window tick");
+        hashes[t] = dqsim_state_hash();
+    }
+
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore: %s", dqsim_last_error());
+    for (int t = 0; t < 144; t++) {
+        if (t == 50)
+            player_fire(0.0f);
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "replay tick");
+        CHECK(dqsim_state_hash() == hashes[t], "tick %d: the restored replay diverged", t);
+    }
+
+    /* From the same snapshot with hearing off, the second shot is not heard:
+     * the hashes diverge from tick 50 on (the hash covers the hearing
+     * state). */
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore again: %s", dqsim_last_error());
+    const dqsim_hearing off = {0, 0.0f, -1.0f, 0};
+    CHECK(dqsim_set_hearing(&off) == DQSIM_OK, "hearing off: %s", dqsim_last_error());
+    int diverged_at = -1;
+    for (int t = 0; t < 144; t++) {
+        if (t == 50)
+            player_fire(0.0f);
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "deaf replay tick");
+        if (diverged_at < 0 && dqsim_state_hash() != hashes[t])
+            diverged_at = t;
+    }
+    CHECK(diverged_at >= 50, "the deaf replay diverged at tick %d, not at the shot",
+          diverged_at);
+    printf("hearing: replay identical, deaf replay diverges at tick %d\n", diverged_at);
+    free(snap);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    hearing_defaults();
+    return 0;
+}
+
+/* 10 of 12: every roster class investigates at half its run speed, and that
+ * is at least 1.2 times its walk speed. */
+static int speed_start_at(const char *map, const char *classname, int *index, int skip)
+{
+    dqsim_player_state player;
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+
+    CHECK(dqsim_load_map(map, 2, 23) == DQSIM_OK, "load %s", map);
+    /* Deaf and untargetable before anything else: the placement's fan
+     * teleports cross monster triggers, the fights' gunfire reaches the
+     * candidates (their alert rolls at the table's 0.5, and the pace
+     * measurements would read the alert's pace), and untargetability stops
+     * the fights outright. */
+    {
+        const dqsim_hearing deaf = {0, 0.0f, -1.0f, 0};
+        CHECK(dqsim_set_hearing(&deaf) == DQSIM_OK, "hearing off: %s", dqsim_last_error());
+    }
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "notarget tick");
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "get player");
+    int count = dqsim_get_entities(entities, 2048);
+    CHECK(count > 0, "get entities");
+    driven_calls = 0;
+    driven_mode = 0;
+    driven_saw_ever = 0;
+    int accepted = 0; /* retries decline the earlier accepted candidates */
+    for (int pick = 0; pick < count; pick++) {
+        if (strcmp(entities[pick].classname, classname) != 0)
+            continue;
+        int idx = entities[pick].index;
+        if (dqsim_set_policy_hook(idx, driven_policy, NULL) != DQSIM_OK)
+            continue;
+        int placed = 0;
+        for (int k = 0; k < 24 && !placed; k++) {
+            float spot_yaw = entities[pick].yaw + (float)(k * 15 + 7);
+            /* Behind the monster's facing only: its walk probes drive it
+             * forward, away from the player, so the sight stays shut. */
+            if (fabsf(remainderf(spot_yaw - entities[pick].yaw, 360.0f)) < 90.0f)
+                continue;
+            if (!place_player_ahead(entities[pick].origin, spot_yaw, 700.0f))
+                continue;
+            CHECK(dqsim_step_repeat(&idle, 72) == DQSIM_OK, "%s settle", classname);
+            if (driven_saw_ever)
+                continue;
+            /* The monster must have room to walk: the pace phases drive it
+             * for hundreds of units, and a closet's few units fail them. A
+             * 144-tick probe also pushes through a door it touches (the
+             * door opens under the monster, and every later phase's touch
+             * re-opens it). */
+            float mstart[3];
+            memcpy(mstart, driven_origin, sizeof(mstart));
+            driven_mode = 1;
+            CHECK(dqsim_step_repeat(&idle, 144) == DQSIM_OK, "drive probe");
+            driven_mode = 0;
+            dqsim_entity moved;
+            if (driven_entity(idx, &moved) &&
+                flat_distance(moved.origin, mstart) >= 30.0f && !driven_saw_ever)
+                placed = 1;
+        }
+        if (!placed) {
+            CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+            continue;
+        }
+        if (accepted < skip) {
+            accepted++;
+            CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+            continue;
+        }
+        CHECK(freeze_monsters_except(idx) >= 8, "only %d other monsters to freeze on %s",
+              frozen_monsters, map);
+        *index = idx;
+        CHECK(driven_calls > 10, "the %s was asked for %d decisions in 1 s", classname,
+              driven_calls);
+        return 0;
+    }
+    return 1;
+}
+
+/* One attempt of a class's three speeds on candidate number `skip`.
+ * Returns 0 when the measurements were taken, 1 when the episode was
+ * spoilt (a walk opened the sight, or the monster found no room) and the
+ * caller retries on the next candidate, 2 when no candidate is left. */
+static int class_speeds_attempt(const char *map, const char *classname, int skip,
+                                float *out_walk, float *out_inv, float *out_run)
+{
+    const dqsim_action idle = {0};
+    dqsim_entity self;
+    int index;
+    hearing_defaults();
+    if (speed_start_at(map, classname, &index, skip))
+        return 2;
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "notarget tick");
+    /* Hearing off for the walk: the placement's fights roll the
+     * candidate's alert, and the walk would be measured at the alert's
+     * pace, not the class's own walk. */
+    {
+        const dqsim_hearing deaf = {0, 0.0f, -1.0f, 0};
+        CHECK(dqsim_set_hearing(&deaf) == DQSIM_OK, "hearing off: %s", dqsim_last_error());
+    }
+    CHECK(dqsim_step_repeat(&idle, 72 * 11) == DQSIM_OK, "let the placement noise expire");
+    CHECK(driven_pace == DQSIM_PACE_WALK, "the pace did not return to walk");
+    CHECK(driven_entity(index, &self), "the %s is gone", classname);
+
+    /* Walk: no enemy, driven forward. The spawn facing may lead into a
+     * corner, so four facings are probed (with the sight checked: a
+     * sighting hands the monster its enemy) and the open one kept. */
+    float best_dir = 0.0f, best_units = 0.0f;
+    for (int dir = 0; dir < 4; dir++) {
+        driven_turn_to = driven_yaw + (float)(dir * 90);
+        driven_mode = 2;
+        CHECK(dqsim_step_repeat(&idle, 30) == DQSIM_OK, "turn probe");
+        float start[3];
+        memcpy(start, self.origin, sizeof(start));
+        driven_mode = 1;
+        CHECK(dqsim_step_repeat(&idle, 24) == DQSIM_OK, "walk probe");
+        CHECK(driven_entity(index, &self), "the %s is gone", classname);
+        float moved = flat_distance(self.origin, start);
+        driven_mode = 0;
+        if (driven_saw_ever) {
+        }
+        if (moved > best_units) {
+            best_units = moved;
+            best_dir = driven_turn_to;
+        }
+    }
+    CHECK(best_units > 4.0f, "no open direction: the best covered %.0f units", best_units);
+    driven_turn_to = best_dir;
+    driven_mode = 2;
+    CHECK(dqsim_step_repeat(&idle, 30) == DQSIM_OK, "turn to the open direction");
+
+    float last[3], fastest[3] = {0.0f, 0.0f, 0.0f}, units[3] = {0.0f, 0.0f, 0.0f};
+    memcpy(last, self.origin, sizeof(last));
+    driven_mode = 1;
+    for (int t = 0; t < 144; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "walk tick");
+        CHECK(driven_entity(index, &self), "the %s is gone", classname);
+        float step = flat_distance(self.origin, last);
+        memcpy(last, self.origin, sizeof(last));
+        units[0] += step;
+        if (step > fastest[0])
+            fastest[0] = step;
+        if (driven_saw_ever) {
+        }
+    }
+
+    /* Investigate: run chance 0, a shot from the player's hidden spot
+     * (speed_start's placement: 700 units out, behind the monster's
+     * facing), driven forward. */
+    const dqsim_hearing investigate = {1, 0.0f, 0.0f, 0};
+    CHECK(dqsim_set_hearing(&investigate) == DQSIM_OK, "run chance 0: %s", dqsim_last_error());
+    player_fire(0.0f);
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "settle");
+    CHECK(driven_pace == DQSIM_PACE_INVESTIGATE,
+          "the %s's alert pace is %d", classname, driven_pace);
+    for (int t = 0; t < 144; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "investigate tick");
+        CHECK(driven_entity(index, &self), "the %s is gone", classname);
+        float step = flat_distance(self.origin, last);
+        memcpy(last, self.origin, sizeof(last));
+        units[1] += step;
+        if (step > fastest[1])
+            fastest[1] = step;
+    }
+
+    /* Run: the player in sight, driven forward. The walk and investigate
+     * phases may have walked the monster into a corner, so it turns back
+     * along the path it came from before the sighting fan runs. */
+    hearing_defaults();
+    driven_turn_to = driven_yaw + 180.0f;
+    driven_mode = 2;
+    CHECK(dqsim_step_repeat(&idle, 48) == DQSIM_OK, "turn around");
+    CHECK(alert_driven(), "no spot in the %s's sight", classname);
+    driven_mode = 1;
+    memcpy(last, self.origin, sizeof(last));
+    for (int t = 0; t < 144; t++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "run tick");
+        CHECK(driven_entity(index, &self), "the %s is gone", classname);
+        float step = flat_distance(self.origin, last);
+        memcpy(last, self.origin, sizeof(last));
+        units[2] += step;
+        if (step > fastest[2])
+            fastest[2] = step;
+    }
+    float walk = fastest[0] * 72.0f, investigate_speed = fastest[1] * 72.0f,
+          run = fastest[2] * 72.0f;
+    printf("speeds: %-22s walk %5.1f  investigate %5.1f  run %6.1f units/s on %s\n", classname,
+           walk, investigate_speed, run, map);
+    CHECK(units[0] > 15.0f && units[1] > 15.0f && units[2] > 30.0f,
+          "%s covered %.0f walk, %.0f investigate, %.0f run units", classname, units[0],
+          units[1], units[2]);
+    CHECK(0.5f * run >= 1.2f * walk, "%s: half its run (%.1f) is not 1.2x its walk (%.1f)",
+          classname, 0.5f * run, walk);
+    *out_walk = walk;
+    *out_inv = investigate_speed;
+    *out_run = run;
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    hearing_defaults();
+    return 0;
+}
+
+static int class_speeds_class(const char *map, const char *classname)
+{
+    float walk = 0.0f, inv = 0.0f, run = 0.0f;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int outcome =
+            class_speeds_attempt(map, classname, attempt, &walk, &inv, &run);
+        if (outcome == 0)
+            return 0;
+        if (outcome == 2)
+            break;
+        CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook between attempts");
+        hearing_defaults();
+    }
+    CHECK(0, "no attempt for %s survived a full episode", classname);
+    return 1;
+}
+
+static int class_speeds(void)
+{
+    fprintf(stderr, "== class_speeds\n");
+
+    return class_speeds_class("e1m1", "monster_army") ||
+           class_speeds_class("e1m1", "monster_dog") ||
+           class_speeds_class("e2m1", "monster_enforcer") ||
+           class_speeds_class("e1m4", "monster_ogre") ||
+           class_speeds_class("e2m5", "monster_hell_knight") ||
+           class_speeds_class("e3m7", "monster_shalrath") ||
+           class_speeds_class("e1m4", "monster_knight") ||
+           class_speeds_class("e2m5", "monster_demon1") ||
+           class_speeds_class("e1m8", "monster_shambler");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1730,6 +2909,10 @@ int main(int argc, char **argv)
         fiend_attack() || fiend_leap() || shambler_drive() || shambler_claw() ||
         shambler_beam() || shambler_aim_error() || animation_frames() ||
         movement_continuity() || shown_facing() || body_speed() ||
+        hearing_gunfire() || hearing_range() || hearing_switch() ||
+        hearing_explosion() || hearing_cries() || hearing_player_noises() ||
+        investigate_pace() || alert_pace_seeded() || hearing_snapshot_replay() ||
+        class_speeds() ||
         melee_needs_reach("e1m1", "monster_dog", 350.0f, 48, 59) ||
         melee_needs_reach("e2m5", "monster_demon1", 350.0f, 21, 26) ||
         melee_needs_reach("e1m4", "monster_knight", 350.0f, 9, 16))
