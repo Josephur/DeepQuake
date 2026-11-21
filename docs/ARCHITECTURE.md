@@ -174,8 +174,12 @@ when the nominated monster's scheduled stand/walk/run think would run,
 the callback instead receives an observation built from live state (its
 own origin, velocity, facing, health and ground/water state; a 2×24 ray
 fan with surface kinds from its eye; the entities it has line of sight
-to, nearest first) and returns an action: absolute facing, forward/side
-speeds, and an attack flag. Movement is applied as ground steps or air
+to, nearest first) and returns an action: a turn in degrees, spread over
+the decision's ticks and each tick measured from the facing the hook
+reports then — so a turn QuakeC's attack states made is kept instead of
+being turned back to a stale heading (RETRAIN_SPEC part 0A) — plus
+forward/side speeds and an attack flag. Movement is applied as ground
+steps or air
 velocity at that same point in the tick, capped at the body's own speed:
 the average of the distances the class's walk and run states pass to
 `ai_walk` and `ai_run` (a Grunt walks at 18 units a second and runs at

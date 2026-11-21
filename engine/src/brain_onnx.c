@@ -99,14 +99,20 @@ typedef struct dq_monster_state {
     float last_seen[3];
     double last_seen_time;
     int last_seen_valid;
-    float yaw;
     int skill;
     /* Which entry of the model's type one-hot this monster is (#48). */
     int type_index;
     /* Decision cadence (#61): the action is held for DQ_FRAME_SKIP ticks like
      * training. skip counts the holds left before the next inference; the held
-     * forward/side/attack are replayed on the holds (yaw is already held above). */
+     * forward/side/attack are replayed on the holds. held_turn is the turn of
+     * the decision in degrees, spread over the block: every tick (decision and
+     * hold alike) asks for the facing the hook just reported plus a sixth of
+     * it, so a turn QuakeC's attack made is kept (RETRAIN_SPEC part 0A, #68).
+     * The split is safe: the hook turns at most DQ_MONSTER_TURN_RATE
+     * (360 degrees/s) times the tick - 5 degrees at 72 Hz - and the largest
+     * turn, 30 degrees over 6 ticks, is 5 per tick. */
     int skip;
+    float held_turn;
     float held_forward;
     float held_side;
     int held_attack;
@@ -465,7 +471,7 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
      * spin/dart. Replay the held action without inferring. */
     if (state->skip > 0) {
         state->skip--;
-        action->desired_yaw = state->yaw;
+        action->desired_yaw = hook->angles[1] + state->held_turn / DQ_FRAME_SKIP;
         action->forward = state->held_forward;
         action->side = state->held_side;
         action->attack = state->held_attack;
@@ -526,10 +532,8 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
     api->ReleaseValue(output_values[1]);
     api->ReleaseValue(output_values[2]);
 
-    state->yaw = fmodf(state->yaw + model->turn[actions[2]], 360.0f);
-    if (state->yaw < 0.0f)
-        state->yaw += 360.0f;
-    action->desired_yaw = state->yaw;
+    state->held_turn = model->turn[actions[2]];
+    action->desired_yaw = hook->angles[1] + state->held_turn / DQ_FRAME_SKIP;
     action->forward = (actions[0] - 1) * DQ_MONSTER_SPEED;
     action->side = (1 - actions[1]) * DQ_MONSTER_SPEED;
     action->attack = actions[3] != 0;
@@ -617,9 +621,9 @@ static void nominate_pass(void)
         state->model = model;
         state->type_index = type_index;
         state->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
-        /* The recurrent state starts at zero for every episode, like
-         * training; the facing continues from the monster's own. */
-        state->yaw = ent->v.angles[YAW];
+        /* The recurrent state starts at zero for every episode, like training.
+         * No facing is carried: every turn is measured from the facing the
+         * hook reports (RETRAIN_SPEC part 0A, #68). */
         const char *error = dq_brain_hook_nominate(i, onnx_policy, state);
         if (error) {
             memset(state, 0, sizeof(*state));
@@ -766,7 +770,6 @@ static void dq_selftest_run(const char *model_path, const char *report)
     memset(&state, 0, sizeof(state));
     state.model = &models[0];
     state.skill = 2;
-    state.yaw = 90.0f;
 
     FILE *out = fopen(report, "w");
     if (!out) {

@@ -689,3 +689,109 @@ def test_monster_env_deterministic():
     require_gamedata()
     out = run_in_subprocess(MONSTER_DETERMINISM, timeout=300)
     assert out[0] == out[1]
+
+
+ATTACK_FACING_EPISODE = """
+import json, math
+import numpy as np
+from deepquake import monster_env, sim
+
+sim.init()
+env = monster_env.MonsterEnv(
+    "e1m1", seed=2026, monster="monster_army", placement="sight",
+    opponent=monster_env.PlayerOpponent("still"), others_passive=True,
+    min_distance=150.0, max_distance=350.0, timeout_steps=360, skills=(2,),
+)
+
+
+def angle_off(a, b):
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def player_bearing(monster_ent):
+    player = sim.player()
+    return math.degrees(math.atan2(
+        player.origin[1] - monster_ent.origin[1],
+        player.origin[0] - monster_ent.origin[0])) % 360.0
+
+
+chosen = None
+for task in monster_env.make_tasks(env, 200, 2026):
+    try:
+        env.set_task(*task)
+    except RuntimeError:
+        continue  # this draw has no sight start; the probe takes the next
+    sim.set_handicap_override(0, 0.0)
+    hook = env._hook_obs
+    entity = env._monster_entity()
+    in_sight = any(v.flags & sim.FL_CLIENT for v in hook.visible)
+    if in_sight and angle_off(player_bearing(entity), hook.angles[1]) >= 60.0:
+        chosen = task
+        break
+assert chosen is not None, "no task in the pool starts visible and 60 degrees off"
+
+# No move, no strafe, turn 0 (index 3 of MONSTER_TURN_DEGREES), attack —
+# until the first attack has fired (the player's health dropped), then hold
+# fire, so the facing the attack chain gave the monster is all that is left
+# to keep (RETRAIN_SPEC part 0A, #68).
+action = np.array([1, 1, 3, 1])
+started = False
+in_sight_count = 0
+facing_count = 0
+result = None
+prev_health = 100.0
+for _ in range(env.timeout_steps):
+    if started:
+        action = np.array([1, 1, 3, 0])
+    result = env.step(action)
+    hook = env._hook_obs
+    entity = env._monster_entity()
+    health = sim.player().health
+    if hook is not None and entity is not None:
+        if not started:
+            started = health < prev_health
+        else:
+            if any(v.flags & sim.FL_CLIENT for v in hook.visible):
+                in_sight_count += 1
+                if angle_off(player_bearing(entity), entity.yaw) <= 45.0:
+                    facing_count += 1
+    prev_health = health
+    if result.done:
+        break
+print(json.dumps({
+    "in_sight": in_sight_count,
+    "facing_ok": facing_count,
+    "steps": env.steps,
+    "started": bool(started),
+}))
+"""
+
+
+@pytest.mark.gamedata
+def test_the_facing_is_not_turned_back_after_an_attack():
+    """A turn QuakeC's attack made is kept (RETRAIN_SPEC part 0A, #68).
+
+    With the old absolute-yaw accumulators, the held decision keeps asking
+    for the pre-attack heading, so after the first attack the hook drags the
+    shown facing away from the player it was told to keep shooting. With the
+    relative rule the turn of a decision is spread over its ticks, each
+    measured from the facing the hook reports, so a QuakeC turn survives.
+
+    Two deviations from the spec's text, measured on the issue (#68): no hook
+    report is built during a QuakeC attack chain, and the Grunt's chain
+    outlasts any attack_finished it sets, so ``attack_cooldown`` never reads
+    positive (0.0 in every decision; Ogre, Enforcer and Knight alike) and the
+    spec's window cannot open; and the Grunt attacks continuously when attack
+    is held, every chain re-facing it, which masks the drag (0.96 within 45
+    degrees on the old code). The test therefore opens its window at the
+    first damage (the attack fired) and holds fire from the decision after
+    it. Old code: 0.02 of counted decisions within 45 degrees. With this
+    fix: 1.00. A Fiend variant was tried and dropped: its counted window is
+    dominated by the engine's blocked-chase steering, 0.31 old and new
+    alike, which no fix changes.
+    """
+    require_gamedata()
+    out = run_in_subprocess(ATTACK_FACING_EPISODE, timeout=600)
+    assert out["started"], "the Grunt never attacked the standing player"
+    assert out["in_sight"] > 0
+    assert out["facing_ok"] >= 0.9 * out["in_sight"]

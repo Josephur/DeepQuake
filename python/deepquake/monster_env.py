@@ -35,8 +35,10 @@ forward {back, stop, ahead} and strafe {left, none, right} at the
 monster's speed (:data:`MONSTER_SPEED` commanded — the hook caps what
 actually moves at the class's own walk or run speed, read from its
 QuakeC states: walking until the monster has an enemy, running after;
-#61), turn in the same 7-step grid the player got from #40
-(accumulated into the facing the hook wants), and attack, which starts
+#61), turn by this many degrees over the decision, from the facing the
+hook reports (RETRAIN_SPEC part 0A: the turn is spread over the
+decision's ticks, each measured from the facing the hook reports then,
+so a turn QuakeC's attack made is kept), and attack, which starts
 the real QuakeC attack sequence when the player is visible and the
 QuakeC cooldown has expired.
 """
@@ -124,9 +126,14 @@ class _Opponent:
 
 @dataclass
 class _Held:
-    """The monster decision the hook returns on every tick of a block."""
+    """The monster decision the hook returns on every tick of a block.
 
-    yaw: float
+    ``turn`` is degrees for the whole decision: the hook adds a sixth of it
+    to the facing it reports each tick (RETRAIN_SPEC part 0A), so a turn a
+    QuakeC attack made is kept instead of being turned back.
+    """
+
+    turn: float
     forward: float
     side: float
     attack: bool
@@ -207,7 +214,6 @@ class MonsterEnv:
         self.observer = monster_obs.MonsterObserver(skill=self.skills[0], style=self.styles[0])
         self.skill = self.skills[0]
         self.steps = 0
-        self.monster_yaw = 0.0
         self.player_yaw = 0.0
         self.player_pitch = 0.0
         self.monster_index = -1
@@ -218,13 +224,28 @@ class MonsterEnv:
 
     # -- brain hook -----------------------------------------------------
 
+    @property
+    def monster_yaw(self) -> float:
+        """The policy facing the hook last reported; 0.0 before the first report.
+
+        Read-only by design (RETRAIN_SPEC part 0A): the held decision no
+        longer accumulates an absolute yaw, so callers that only need to know
+        where the monster is looking read this instead of maintaining one.
+        """
+        return self._hook_obs.angles[1] if self._hook_obs is not None else 0.0
+
     def _hook_policy(self, hook: sim.HookObservation) -> sim.HookAction | None:
-        """Runs inside ``sim.step``, once per tick: cache the report, hold the decision."""
+        """Runs inside ``sim.step``, once per tick: cache the report, hold the decision.
+
+        The held turn is measured from the facing each report gives, a sixth
+        of it per tick; a turn QuakeC made since the last tick is therefore
+        kept (RETRAIN_SPEC part 0A).
+        """
         self._hook_obs = hook
         if self._held is None:
             return None
         return sim.HookAction(
-            desired_yaw=self._held.yaw,
+            desired_yaw=hook.angles[1] + self._held.turn / nav.FRAME_SKIP,
             forward=self._held.forward,
             side=self._held.side,
             attack=self._held.attack,
@@ -328,7 +349,6 @@ class MonsterEnv:
                 sim.step(repeat=2)
             if self._hook_obs is None:
                 raise RuntimeError("the hooked monster never thought during the warm-up")
-            self.monster_yaw = self._hook_obs.angles[1]
         self.opponent.reset()
         return self._monster_observation()
 
@@ -404,9 +424,8 @@ class MonsterEnv:
     def step(self, action: np.ndarray | None) -> nav.StepResult:
         if self.brain == "policy" and action is not None:
             forward, strafe, turn, attack = (int(a) for a in action)
-            self.monster_yaw = (self.monster_yaw + MONSTER_TURN_DEGREES[turn]) % 360.0
             self._held = _Held(
-                yaw=self.monster_yaw,
+                turn=MONSTER_TURN_DEGREES[turn],
                 forward=(forward - 1) * MONSTER_SPEED,
                 side=(1 - strafe) * MONSTER_SPEED,
                 attack=bool(attack),
