@@ -17,6 +17,14 @@ int dqsim_rand(void);
 uint64_t dq_rand_state(void);
 void dq_rand_set_state(uint64_t state);
 
+/* rng.c: the hearing stream, separate from the game's (RETRAIN_SPEC part 0B,
+ * per the maintainer's decision on the issue): the alert's pace draws here,
+ * so hearing consumes no draw of the game's or the handicaps' stream. */
+void dq_hear_rng_seed(uint32_t seed);
+int dq_hear_rng(void);
+uint64_t dq_hear_rng_state(void);
+void dq_hear_rng_set_state(uint64_t state);
+
 /*
  * handicap.c: skill-scaled handicaps for policy-driven monsters (#34).
  * Kept free of engine types so the play client (M5) compiles the same
@@ -29,6 +37,23 @@ typedef struct dq_handicap_state {
     float aim_yaw_deg;   /* rolled error for the pending attack */
     float aim_pitch_deg;
 } dq_handicap_state;
+
+/*
+ * brain_hook.c: everything the hook changes per nominated monster while it
+ * runs (RETRAIN_SPEC part 0B), beyond the handicap above. Plain types, like
+ * dq_handicap_state, so snapshots and the state hash carry it and the play
+ * client compiles the same code. The animation clock lives here too: it was
+ * never carried before, which the spec's snapshot work closes.
+ */
+typedef struct dq_slot_state {
+    unsigned anim_tick;          /* the monster's animation clock */
+    float investigate_phase;     /* walk-frame phase advanced by distance */
+    int heard_valid;             /* 1 while a heard noise is remembered */
+    float heard_origin[3];       /* where the noise was, world coordinates */
+    double heard_time;           /* sv.time when it was heard */
+    int heard_kind;              /* DQSIM_NOISE_* */
+    int pace;                    /* DQSIM_PACE_*: the alert's pace */
+} dq_slot_state;
 
 /* The schedule: reaction delay in ticks and aim error in degrees, per skill. */
 void dq_handicap_schedule(int skill, int *reaction_ticks, float *aim_error_deg);

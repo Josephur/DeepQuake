@@ -227,6 +227,7 @@ int dqsim_load_map(const char *map, int skill, uint32_t seed)
     DQ_ENTER();
 
     dq_rand_seed(seed);
+    dq_hear_rng_seed(seed); /* the hearing stream's own seed, part 0B */
     realtime = 0;
     host_framecount = 0;
 
@@ -407,6 +408,24 @@ int dqsim_set_handicap_override(int32_t reaction_ticks, float aim_error_deg)
     return DQSIM_OK;
 }
 
+/* Hearing (RETRAIN_SPEC part 0B). Settings are process-wide and survive map
+ * loads, so unlike the handicap override they need no nomination and no
+ * session: they take effect from the next sound on. */
+int dqsim_set_hearing(const dqsim_hearing *settings)
+{
+    dq_brain_set_hearing(settings); /* NULL restores the library's defaults */
+    return DQSIM_OK;
+}
+
+int dqsim_hearing_for_skill(int skill, dqsim_hearing *out)
+{
+    if (!out || skill < 0 || skill > 3)
+        return fail("dqsim_hearing_for_skill: skill must be 0-3 and out non-NULL");
+    if (dq_brain_hearing_for_skill(skill, out))
+        return DQSIM_ERROR;
+    return DQSIM_OK;
+}
+
 int dqsim_progs_is_stock(void)
 {
     DQ_ENTER();
@@ -532,12 +551,20 @@ uint64_t dqsim_state_hash(void)
     }
     /* Every policy-driven monster's handicap, in slot order (M6: a level
      * can have dozens). This is the hook-owned state, so the deterministic
-     * hash covers what the engine itself decides about handicaps. */
+     * hash covers what the engine itself decides about handicaps. The
+     * hook-run state beside them (animation clock, investigation phase,
+     * heard noise, alert pace; RETRAIN_SPEC part 0B) is hook-owned too and
+     * changes what the engine decides, so it is hashed as well. */
     dq_handicap_state handicaps[DQ_BRAIN_MAX_MONSTERS];
+    dq_slot_state slots[DQ_BRAIN_MAX_MONSTERS];
     int hook_count = (int)dq_brain_hook_handicaps(handicaps, DQ_BRAIN_MAX_MONSTERS);
+    int slot_count = (int)dq_brain_hook_slot_states(slots, DQ_BRAIN_MAX_MONSTERS);
     hash = dq_fnv1a(hash, &hook_count, sizeof(hook_count));
     for (int i = 0; i < hook_count; i++)
         hash = dq_fnv1a(hash, &handicaps[i], sizeof(handicaps[i]));
+    hash = dq_fnv1a(hash, &slot_count, sizeof(slot_count));
+    for (int i = 0; i < slot_count; i++)
+        hash = dq_fnv1a(hash, &slots[i], sizeof(slots[i]));
     return hash;
 }
 
@@ -569,8 +596,10 @@ typedef struct dq_snapshot_header {
     uint32_t level_serial;
     char map[64];
     uint64_t rng_state;
+    uint64_t hear_rng_state; /* the hearing stream's state (part 0B) */
     int hook_count; /* policy-driven monsters in slot order (M6) */
     dq_handicap_state handicaps[DQ_BRAIN_MAX_MONSTERS]; /* #34 handicap state */
+    dq_slot_state slots[DQ_BRAIN_MAX_MONSTERS]; /* hook-run state (0B) */
     double realtime;
     int host_framecount;
     int level_count;
@@ -662,7 +691,11 @@ int dqsim_snapshot_save(dqsim_snapshot **out)
     h->level_serial = level_serial;
     q_strlcpy(h->map, sv.name, sizeof(h->map));
     h->rng_state = dq_rand_state();
+    h->hear_rng_state = dq_hear_rng_state();
     h->hook_count = (int)dq_brain_hook_handicaps(h->handicaps, DQ_BRAIN_MAX_MONSTERS);
+    if ((size_t)h->hook_count !=
+        dq_brain_hook_slot_states(h->slots, DQ_BRAIN_MAX_MONSTERS))
+        return fail("dqsim_snapshot_save: handicap and slot state counts differ");
     h->realtime = realtime;
     h->host_framecount = host_framecount;
     h->level_count = level_count;
@@ -744,7 +777,9 @@ int dqsim_snapshot_restore(const dqsim_snapshot *snapshot)
     memcpy(pr_global_struct, p + h->globals_offset, (size_t)h->numglobals * sizeof(float));
     dq_net_set_state((const dq_net_state *)(p + h->net_offset));
     dq_rand_set_state(h->rng_state);
+    dq_hear_rng_set_state(h->hear_rng_state);
     dq_brain_set_handicap_states(h->handicaps, (size_t)h->hook_count);
+    dq_brain_set_slot_states(h->slots, (size_t)h->hook_count);
     memcpy(&cmd_text, p + h->cmd_struct_offset, sizeof(cmd_text));
     if (h->cmd_size)
         memcpy(cmd_text.data, p + h->cmd_offset, h->cmd_size);

@@ -583,6 +583,10 @@ static void nominate_pass(void)
         last_edicts = sv.edicts;
         memset(monster_states, 0, sizeof(monster_states));
         reported_driven = -1;
+        /* The client loads maps through the console, so no load seed reaches
+         * it: the hearing stream seeds from the map name (part 0B), keeping
+         * the paces deterministic per map. */
+        dq_hear_rng_seed(dq_fnv1a(DQ_FNV1A_SEED, sv.name, strlen(sv.name)));
     }
     release_dead_states();
     if (!cvar_model->string[0])

@@ -14,6 +14,7 @@
 /* handicap.c's state struct (dq_internal.h), kept out of this header so
  * the client can include it without the simulator's private bits. */
 typedef struct dq_handicap_state dq_handicap_state;
+typedef struct dq_slot_state dq_slot_state;
 
 /* fnv1a.c-style hashing shared with dqsim.c's state hash. */
 #define DQ_FNV1A_SEED 14695981039346656037ULL
@@ -78,6 +79,12 @@ void dq_brain_hook_set_tick(void (*fn)(void));
 int dq_brain_handicap_for_skill(int skill, dqsim_handicap *out);
 void dq_brain_set_handicap_override(int32_t reaction_ticks, float aim_error_deg);
 
+/* Hearing (RETRAIN_SPEC part 0B), as in the public API: dqsim.c wraps these
+ * for the simulator; the client (brain_onnx.c) calls them directly and
+ * feeds them from its dq_hearing cvars. */
+void dq_brain_set_hearing(const dqsim_hearing *settings);
+int dq_brain_hearing_for_skill(int skill, dqsim_hearing *out);
+
 /* The active nominations' handicap states, in slot order (at most `max`).
  * The state hash and snapshots cover all of them, so a caller that hashes
  * or restores engine state sees every policy-driven monster. */
@@ -88,5 +95,11 @@ size_t dq_brain_hook_handicaps(dq_handicap_state *out, size_t max);
  * the nominations this process currently holds (snapshots are per level
  * episode, so a mismatch is a stale snapshot, not a state to guess at). */
 int dq_brain_set_handicap_states(const dq_handicap_state *in, size_t count);
+
+/* The active nominations' hook-run state (animation clock, investigation
+ * phase, heard noise, alert pace), in the same slot order as the handicaps
+ * and covered by the state hash and snapshots for the same reason. */
+size_t dq_brain_hook_slot_states(dq_slot_state *out, size_t max);
+int dq_brain_set_slot_states(const dq_slot_state *in, size_t count);
 
 #endif
