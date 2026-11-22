@@ -8,6 +8,8 @@ drives one through the Python callback on e1m1 and on the generated map
 import pytest
 from test_sim import require_gamedata, run_in_subprocess
 
+from deepquake import sim
+
 POLICY = """
 import math
 from deepquake import sim
@@ -194,3 +196,17 @@ def test_many_monsters_nominated_at_once():
     require_gamedata()
     out = run_in_subprocess(MULTI_MONSTER, timeout=300)
     assert out["nominated"] >= 2
+
+
+def test_hearing_settings_round_trip():
+    """The hearing settings API matches the skill table and takes its defaults
+    (RETRAIN_SPEC part 0B)."""
+    assert sim.hearing_for_skill(0) == (500.0, 0.25)
+    assert sim.hearing_for_skill(1) == (1000.0, 0.5)
+    assert sim.hearing_for_skill(2) == (1000.0, 0.5)
+    assert sim.hearing_for_skill(3) == (1500.0, 0.75)
+    with pytest.raises(Exception):  # noqa: B017 - the exact type is the C error wrapper
+        sim.hearing_for_skill(4)
+    sim.set_hearing()  # the defaults: on, the skill table, no player noises
+    sim.set_hearing(enabled=False, range=500.0, run_chance=0.5, player_noises=True)
+    sim.set_hearing()  # back to the defaults, for whatever runs after

@@ -313,6 +313,31 @@ stay and batched inference waits for a measurement that needs it. id1 gates
 monster counts by skill (e1m1 stocks 18 Grunts at skill 1 and 34 at skill 2),
 which is why the console line, not the map, says how many are driven.
 
+**Hearing (RETRAIN_SPEC part 0B).** A driven monster hears what it cannot
+see. QuakeC sounds are caught by compiling `pr_cmds.c` (and the client's
+`sv_phys.c`) with `SV_StartSound`, `MSG_WriteByte` and `MSG_WriteCoord`
+renamed into hearing wrappers in `brain_hook.c` — the vendored files are
+unmodified; QuakeC's temp-entity explosions (TE_EXPLOSION, TE_TAREXPLOSION)
+are caught by a small state machine on the writes to `sv.datagram`. A noise
+is gunfire (CHAN_WEAPON from a client or monster), an explosion, a cry
+(CHAN_VOICE from a monster whose health is gone or whose own `th_pain` is
+executing) or a player noise (any other sound the player makes; off by
+default). Every nominated, live monster other than the emitter hears a noise
+within its range — sound passes through walls — and keeps only the most
+recent one (two in one tick: the nearer wins) for ten seconds. A monster
+without an enemy that hears while remembering nothing starts an **alert**:
+its pace is drawn once from the seeded hearing stream (separate from the
+game's, so hearing changes no draw the game or the handicaps would have
+made) as run or investigate; investigate is half the run speed and plays the
+walk frames advanced by distance, so the feet keep pace with the ground.
+When the noise is forgotten the alert ends and the pace returns to walk.
+Hearing is a setting of the glue, never a model input: `dqsim_set_hearing`
+turns it, the range and the run chance, and the defaults come from the
+monster's own skill (easy 500 units/0.25, normal and hard 1000/0.5,
+nightmare 1500/0.75), every entry overridable by the caller. The
+observation's hearing fields say where the noise was and how long ago; which
+kind it was is for tests and logs only.
+
 ### 3. Observations and actions
 
 Chosen to be cheap to compute in the simulator and identical in the client:
@@ -397,8 +422,9 @@ fair nor fun. Difficulty therefore comes from three places:
    refires almost immediately there.
 2. **Fair senses.** A monster's observation holds only what that monster
    could see or hear: enemies in line of sight, sounds within hearing
-   range, and its own memory of where the enemy was last seen. The player's
-   position through walls is never an input.
+   range (sound passes through walls, as it does for the player), and its
+   own memory of where the enemy was last seen and where the last noise
+   came from. The player's position through walls is never an input.
 3. **A skill input to the network.** The policy is told the skill level and
    is trained at every level, against opponents of different strength, so
    that easy means simpler play (less flanking, slower to press an

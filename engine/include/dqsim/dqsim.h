@@ -238,6 +238,15 @@ typedef struct dqsim_hook_observation {
     int32_t visible_count; /* entries used in visible[], nearest first */
     dqsim_hook_visible visible[DQSIM_HOOK_MAX_VISIBLE];
     float attack_cooldown; /* seconds until QuakeC lets it attack again */
+    /* Hearing (RETRAIN_SPEC part 0B), and the pace the hook moves the
+     * monster at now. heard_kind is for tests and logs, never a policy
+     * input. */
+    float start_health;      /* health when nominated */
+    int32_t heard;           /* 1 while a heard noise is remembered */
+    int32_t heard_kind;      /* DQSIM_NOISE_* */
+    float heard_relative[3]; /* where the noise was, minus the monster's origin */
+    float heard_age;         /* seconds since it was heard */
+    int32_t pace;            /* DQSIM_PACE_* */
 } dqsim_hook_observation;
 
 typedef struct dqsim_hook_action {
@@ -300,6 +309,42 @@ DQSIM_API int dqsim_handicap_for_skill(int skill, dqsim_handicap *out);
  * client sets nothing here), and lasts until cleared or the next level.
  */
 DQSIM_API int dqsim_set_handicap_override(int32_t reaction_ticks, float aim_error_deg);
+
+/*
+ * Hearing (RETRAIN_SPEC part 0B): what a policy-driven monster hears while
+ * its policy is not looking. Gunfire, explosions, and monsters' pain and
+ * death cries reach every nominated, live monster within range, sound
+ * passing through walls; a monster never hears its own sounds. What the
+ * player does besides shooting (jumps, landings, pickups, pain) counts
+ * only with player_noises. The settings are process-wide, apply to every
+ * nomination, and survive map loads; they are settings of the engine glue,
+ * never inputs to the model. Hearing as a whole, what is heard, and the
+ * range are switchable; with range 0 or run_chance below 0 the skill
+ * table's value is used, so the game's difficulty chooses the defaults
+ * and every entry can be overridden.
+ */
+#define DQSIM_NOISE_GUNFIRE 1    /* a weapon sound from a client or a monster */
+#define DQSIM_NOISE_EXPLOSION 2  /* a QuakeC temp-entity explosion */
+#define DQSIM_NOISE_CRY 3        /* a monster's pain or death cry */
+#define DQSIM_NOISE_PLAYER 4     /* any other sound the player makes */
+#define DQSIM_PACE_WALK 0        /* no alert: the class's walk speed */
+#define DQSIM_PACE_INVESTIGATE 1 /* alerted, investigating: half its run speed */
+#define DQSIM_PACE_RUN 2         /* alerted, running, or with an enemy */
+#define DQSIM_HOOK_HEARD_SECONDS 10.0f /* a heard noise is remembered this long */
+
+typedef struct dqsim_hearing {
+    int32_t enabled;       /* 0: no monster hears anything; 1: hearing on (default) */
+    float range;           /* units; 0 or less: the skill table's (default 0) */
+    float run_chance;      /* 0-1: chance an alert is run, not investigated;
+                              below 0: the skill table's (default -1) */
+    int32_t player_noises; /* 1: also hear every sound the player makes (default 0) */
+} dqsim_hearing;
+
+/* Change the hearing settings. NULL restores the defaults. */
+DQSIM_API int dqsim_set_hearing(const dqsim_hearing *settings);
+
+/* The hearing settings the skill table gives a Quake skill level (0-3). */
+DQSIM_API int dqsim_hearing_for_skill(int skill, dqsim_hearing *out);
 
 /* Name of the map currently loaded ("e1m1"), or "" if none. */
 DQSIM_API const char *dqsim_map_name(void);

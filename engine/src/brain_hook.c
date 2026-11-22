@@ -145,7 +145,15 @@ typedef struct dq_hook_slot {
     /* The body's own speeds in units per second (see DQ_STATE_INTERVAL);
      * 0 = the class's chain names no distance, and nothing is capped. */
     float run_speed, walk_speed;
-    unsigned anim_tick;
+    /* Everything the hook changes per monster while it runs (RETRAIN_SPEC
+     * part 0B): the animation clock, the investigation phase, the heard
+     * noise and the alert pace. Carried by snapshots and the state hash
+     * (dq_brain_hook_slot_states), which also closes the gap that the
+     * animation clock was never carried. */
+    dq_slot_state state;
+    /* The monster's health when nominated: the observation's health input
+     * is a fraction of it (part 0D uses it; the field is kept from here). */
+    float start_health;
     dq_handicap_state handicap;
     int skill;
 } dq_hook_slot;
@@ -170,6 +178,193 @@ static char hook_level_name[MAX_QPATH];
  * restart reloads the same map name, but SV_SpawnServer reallocates the
  * edicts, which is the signal snapshots already use for "new episode". */
 static void *hook_edicts;
+
+/* Hearing (RETRAIN_SPEC part 0B). Process-wide settings that survive map
+ * loads; the skill table gives the defaults that `skill` chooses between
+ * and that every entry of can be overridden. A monster's own range and
+ * run chance come from its slot's skill when the settings name no value. */
+static dqsim_hearing hearing = {1, 0.0f, -1.0f, 0};
+static const struct {
+    float range;
+    float run_chance;
+} hearing_table[4] = {
+    {500.0f, 0.25f}, /* 0 easy */
+    {1000.0f, 0.5f}, /* 1 normal */
+    {1000.0f, 0.5f}, /* 2 hard */
+    {1500.0f, 0.75f}, /* 3 nightmare */
+};
+/* The explosion temp-entity write the hearing watches for: svc_temp_entity
+ * (23), then TE_EXPLOSION (3) or TE_TAREXPLOSION (4), then three
+ * coordinates, written to sv.datagram by QuakeC (PF_WriteByte and
+ * PF_WriteCoord, renamed into the wrappers below). */
+#define DQ_HEAR_TE_NONE 0
+#define DQ_HEAR_TE_MARKER 1
+#define DQ_HEAR_TE_KIND 2
+static int hear_te_state;
+static int hear_te_coords;
+static vec3_t hear_te_origin;
+
+void dq_brain_set_hearing(const dqsim_hearing *settings)
+{
+    if (settings)
+        hearing = *settings;
+    else
+        hearing = (dqsim_hearing){1, 0.0f, -1.0f, 0};
+}
+
+int dq_brain_hearing_for_skill(int skill, dqsim_hearing *out)
+{
+    if (skill < 0 || skill > 3 || !out)
+        return -1;
+    out->enabled = 1;
+    out->range = hearing_table[skill].range;
+    out->run_chance = hearing_table[skill].run_chance;
+    out->player_noises = 0;
+    return 0;
+}
+
+/* The hearing this slot uses: its own skill's table row where the settings
+ * name no value. */
+static void hearing_for_slot(const dq_hook_slot *slot, dqsim_hearing *out)
+{
+    *out = hearing;
+    if (out->range <= 0.0f)
+        out->range = hearing_table[slot->skill].range;
+    if (out->run_chance < 0.0f)
+        out->run_chance = hearing_table[slot->skill].run_chance;
+}
+
+/* Whether the executing QuakeC function is the emitter's own pain handler:
+ * a cry is the emitter's death sound (health gone) or its th_pain. */
+static int hear_is_cry(edict_t *entity)
+{
+    if (entity->v.health <= 0.0f)
+        return 1;
+    eval_t *th_pain = GetEdictFieldValue(entity, "th_pain");
+    if (th_pain && th_pain->function && pr_xfunction &&
+        (func_t)(pr_xfunction - pr_functions) == th_pain->function)
+        return 1;
+    return 0;
+}
+
+/* Hand one noise to every nominated, live monster other than the emitter
+ * that is within its hearing range. Each monster keeps the most recent
+ * noise; two in the same tick, the nearer wins. A monster without an enemy
+ * that hears while remembering nothing starts an alert, whose pace is
+ * drawn once from the seeded stream. */
+static void hear_deliver(int kind, const vec3_t origin, const edict_t *emitter)
+{
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++) {
+        dq_hook_slot *slot = &hook_slots[i];
+        if (!slot->entity_index)
+            continue;
+        edict_t *ent = EDICT_NUM(slot->entity_index);
+        if (ent->free || ent->v.health <= 0.0f || ent == emitter)
+            continue;
+        dqsim_hearing own;
+        hearing_for_slot(slot, &own);
+        float dx = origin[0] - ent->v.origin[0];
+        float dy = origin[1] - ent->v.origin[1];
+        float dz = origin[2] - ent->v.origin[2];
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (distance > own.range)
+            continue;
+        if (slot->state.heard_valid) {
+            if (slot->state.heard_time > sv.time)
+                continue; /* a future noise from another tick's clock: keep it */
+            if (slot->state.heard_time == sv.time) {
+                float ox = ent->v.origin[0] - slot->state.heard_origin[0];
+                float oy = ent->v.origin[1] - slot->state.heard_origin[1];
+                float oz = ent->v.origin[2] - slot->state.heard_origin[2];
+                if (distance * distance >= ox * ox + oy * oy + oz * oz)
+                    continue; /* two noises in one tick: the nearer wins */
+            }
+        }
+        int fresh_alert = !slot->state.heard_valid;
+        slot->state.heard_valid = 1;
+        VectorCopy(origin, slot->state.heard_origin);
+        slot->state.heard_time = sv.time;
+        slot->state.heard_kind = kind;
+        if (fresh_alert && !ent->v.enemy) {
+            /* The alert's pace, once per alert: run or investigate, from the
+             * hearing stream (separate from the game's, per the maintainer's
+             * decision on the issue; deterministic for a load seed). */
+            double draw = dq_hear_rng() / (double)RAND_MAX;
+            slot->state.pace = draw < own.run_chance ? DQSIM_PACE_RUN
+                                                     : DQSIM_PACE_INVESTIGATE;
+        }
+    }
+}
+
+/* The SV_StartSound every QuakeC sound() arrives through in the simulator
+ * and the client (pr_cmds.c, and sv_phys.c, are compiled with the name
+ * renamed to this): classify, deliver, then make the real sound. With
+ * hearing off or no nominated monster this changes nothing. */
+void dq_hear_start_sound(edict_t *entity, int channel, const char *sample, int volume,
+                         float attenuation)
+{
+    int kind = 0;
+    int flags = entity ? (int)entity->v.flags : 0;
+    if (hearing.enabled && entity) {
+        if ((channel & 7) == 1 && (flags & (FL_CLIENT | FL_MONSTER)))
+            kind = DQSIM_NOISE_GUNFIRE;
+        else if ((channel & 7) == 2 && (flags & FL_MONSTER) && hear_is_cry(entity))
+            kind = DQSIM_NOISE_CRY;
+        else if (hearing.player_noises && (flags & FL_CLIENT))
+            kind = DQSIM_NOISE_PLAYER;
+    }
+    if (kind)
+        hear_deliver(kind, entity->v.origin, entity);
+    SV_StartSound(entity, channel, sample, volume, attenuation);
+}
+
+void dq_hear_write_byte(sizebuf_t *sb, int c)
+{
+    if (sb == &sv.datagram) {
+        if (hear_te_state == DQ_HEAR_TE_NONE) {
+            if (c == 23) /* svc_temp_entity */
+                hear_te_state = DQ_HEAR_TE_MARKER;
+        } else if (hear_te_state == DQ_HEAR_TE_MARKER) {
+            if (c == 3 || c == 4) { /* TE_EXPLOSION, TE_TAREXPLOSION */
+                hear_te_state = DQ_HEAR_TE_KIND;
+            } else {
+                hear_te_state = DQ_HEAR_TE_NONE;
+            }
+            hear_te_coords = 0;
+        } else {
+            hear_te_state = DQ_HEAR_TE_NONE;
+        }
+    }
+    MSG_WriteByte(sb, c);
+}
+
+void dq_hear_write_coord(sizebuf_t *sb, float f, unsigned int flags)
+{
+    if (sb == &sv.datagram) {
+        if (hear_te_state == DQ_HEAR_TE_KIND) {
+            hear_te_origin[hear_te_coords++] = f;
+            if (hear_te_coords == 3) {
+                hear_deliver(DQSIM_NOISE_EXPLOSION, hear_te_origin, NULL);
+                hear_te_state = DQ_HEAR_TE_NONE;
+            }
+        } else if (hear_te_state != DQ_HEAR_TE_NONE) {
+            hear_te_state = DQ_HEAR_TE_NONE;
+        }
+    }
+    MSG_WriteCoord(sb, f, flags);
+}
+
+/* Forget a heard noise past its memory and end the alert. Runs per
+ * nominated monster per applied tick, and before each report. */
+static void hear_tick(dq_hook_slot *slot, const edict_t *ent)
+{
+    if (slot->state.heard_valid &&
+        sv.time - slot->state.heard_time >= DQSIM_HOOK_HEARD_SECONDS) {
+        slot->state.heard_valid = 0;
+        slot->state.pace = DQSIM_PACE_WALK;
+    }
+    (void)ent;
+}
 
 static int read_whole_file(const char *path, unsigned char **out, size_t *length);
 static int read_pak_progs(const char *path, unsigned char **out, size_t *length);
@@ -385,6 +580,36 @@ int dq_brain_set_handicap_states(const dq_handicap_state *in, size_t count)
     for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
         if (hook_slots[i].entity_index)
             hook_slots[i].handicap = in[at++];
+    return (int)count;
+}
+
+size_t dq_brain_hook_slot_states(dq_slot_state *out, size_t max)
+{
+    size_t count = 0;
+
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++) {
+        if (!hook_slots[i].entity_index)
+            continue;
+        if (count < max && out)
+            out[count] = hook_slots[i].state;
+        count++;
+    }
+    return count;
+}
+
+int dq_brain_set_slot_states(const dq_slot_state *in, size_t count)
+{
+    size_t occupied = 0;
+
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index)
+            occupied++;
+    if (occupied != count)
+        return -1;
+    size_t at = 0;
+    for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
+        if (hook_slots[i].entity_index)
+            hook_slots[i].state = in[at++];
     return (int)count;
 }
 
@@ -727,12 +952,12 @@ static float policy_yaw(edict_t *ent)
     return ent->v.v_angle[YAW];
 }
 
-static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation *obs)
+static void hook_observe(const dq_hook_slot *slot, edict_t *ent, dqsim_hook_observation *obs)
 {
     static const float pitches[DQSIM_HOOK_RAY_PITCHES] = {0.0f, 30.0f};
     memset(obs, 0, sizeof(*obs));
     obs->time = sv.time;
-    obs->entity_index = entity_index;
+    obs->entity_index = slot->entity_index;
     VectorCopy(ent->v.origin, obs->origin);
     VectorCopy(ent->v.velocity, obs->velocity);
     VectorCopy(ent->v.angles, obs->angles);
@@ -744,6 +969,17 @@ static void hook_observe(int entity_index, edict_t *ent, dqsim_hook_observation 
     obs->attack_cooldown = cooldown && cooldown->_float > (float)sv.time
                                ? cooldown->_float - (float)sv.time
                                : 0.0f;
+    /* Hearing (RETRAIN_SPEC part 0B): the remembered noise and the pace the
+     * hook moves the monster at now — with an enemy it runs, whatever the
+     * alert rolled. hear_tick already forgot an expired noise. */
+    obs->start_health = slot->start_health;
+    if (slot->state.heard_valid) {
+        obs->heard = 1;
+        obs->heard_kind = slot->state.heard_kind;
+        VectorSubtract(slot->state.heard_origin, ent->v.origin, obs->heard_relative);
+        obs->heard_age = (float)(sv.time - slot->state.heard_time);
+    }
+    obs->pace = ent->v.enemy ? DQSIM_PACE_RUN : slot->state.pace;
 
     vec3_t eye;
     VectorAdd(ent->v.origin, ent->v.view_ofs, eye);
@@ -843,8 +1079,27 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
                 ent->v.enemy = EDICT_TO_PROG(EDICT_NUM(obs->visible[i].index));
                 break;
             }
-    int running = ent->v.enemy || slot->walk_len == 0 || slot->walk_speed <= 0.0f;
-    float body_speed = running ? slot->run_speed : slot->walk_speed;
+    /* The pace the monster moves at now (RETRAIN_SPEC part 0B): with an
+     * enemy it runs, as today; an alert (a heard noise) chooses between
+     * running and investigating, at half the run speed, until the noise is
+     * forgotten. A class with no walk chain runs at every pace. */
+    hear_tick(slot, ent);
+    int pace = ent->v.enemy ? DQSIM_PACE_RUN : slot->state.pace;
+    int running;
+    float body_speed;
+    if (ent->v.enemy || slot->walk_len == 0 || slot->walk_speed <= 0.0f) {
+        running = 1;
+        body_speed = slot->run_speed;
+    } else if (pace == DQSIM_PACE_INVESTIGATE) {
+        running = 0;
+        body_speed = 0.5f * slot->run_speed;
+    } else if (pace == DQSIM_PACE_RUN) {
+        running = 1;
+        body_speed = slot->run_speed;
+    } else {
+        running = 0;
+        body_speed = slot->walk_speed;
+    }
     float charge_speed = slot->run_speed > 0.0f ? slot->run_speed : DQ_CHARGE_SPEED;
     eval_t *cooldown = enemy ? GetEdictFieldValue(ent, "attack_finished") : NULL;
     int ready = !cooldown || sv.time >= cooldown->_float;
@@ -883,6 +1138,7 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
      * scaled to the hook's own turn rate. The body's facing is the policy's
      * for as long as the charge lasts. */
     int chased = 0, chase_moved = 0;
+    float moved_dist = 0.0f; /* what the body covered this tick, for the pace's frames */
     if (charging && !leap && ((int)ent->v.flags & FL_ONGROUND)) {
         vec3_t before;
         float yaw_speed = ent->v.yaw_speed;
@@ -898,6 +1154,8 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         float dx = ent->v.origin[0] - before[0], dy = ent->v.origin[1] - before[1];
         float asked = charge_speed * (float)host_frametime * DQ_MOVED_FRACTION;
         chase_moved = dx * dx + dy * dy >= asked * asked;
+        if (chase_moved)
+            moved_dist = sqrtf(dx * dx + dy * dy);
         chased = 1;
         new_yaw = ent->v.angles[YAW];
     }
@@ -930,12 +1188,14 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
             float asked = speed * (float)host_frametime * DQ_MOVED_FRACTION;
             if (dx * dx + dy * dy >= asked * asked) {
                 moved = 1;
+                moved_dist = sqrtf(dx * dx + dy * dy);
                 travel_yaw = atan2f(dy, dx) * 180.0f / 3.14159265f;
             }
         } else {
             ent->v.velocity[0] = wish[0];
             ent->v.velocity[1] = wish[1];
             moved = 1;
+            moved_dist = speed * (float)host_frametime;
             travel_yaw = atan2f(wish[1], wish[0]) * 180.0f / 3.14159265f;
         }
     }
@@ -992,10 +1252,23 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
         /* Animate from the state functions' own frames: run while really
          * moving, stand while still or held by a wall (running on the spot is
          * what a refused step used to look like), advancing at the QuakeC
-         * think cadence. */
-        slot->anim_tick++;
-        unsigned step = slot->anim_tick / 7;
-        if (moved && !running)
+         * think cadence. The investigation pace plays the walk frames
+         * advanced by distance instead (RETRAIN_SPEC part 0B): a stock walk
+         * covers walk_speed * DQ_STATE_INTERVAL per frame and the
+         * investigation pace covers the same, so the feet keep pace with
+         * the ground. */
+        slot->state.anim_tick++;
+        unsigned step = slot->state.anim_tick / 7;
+        if (pace == DQSIM_PACE_INVESTIGATE) {
+            if (moved) {
+                slot->state.investigate_phase +=
+                    moved_dist / (slot->walk_speed * DQ_STATE_INTERVAL);
+                ent->v.frame =
+                    slot->walk_seq[(unsigned)slot->state.investigate_phase %
+                                   (unsigned)slot->walk_len];
+            } else if (slot->stand_len > 0)
+                ent->v.frame = slot->stand_seq[step % (unsigned)slot->stand_len];
+        } else if (moved && !running)
             ent->v.frame = slot->walk_seq[step % (unsigned)slot->walk_len];
         else if (moved && slot->run_len > 0)
             ent->v.frame = slot->run_seq[step % (unsigned)slot->run_len];
@@ -1095,7 +1368,8 @@ void dqsim_hook_execute_program(func_t fnum)
                  * the next one. */
                 slot->handicap.aim_pending = 0;
                 dqsim_hook_observation obs;
-                hook_observe(slot->entity_index, ent, &obs);
+                hear_tick(slot, ent);
+                hook_observe(slot, ent, &obs);
                 int visible_enemy = -1;
                 for (int i = 0; i < obs.visible_count; i++)
                     if (obs.visible[i].flags & FL_CLIENT) {
@@ -1257,6 +1531,7 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
     slot->callback = callback;
     slot->user = user;
     slot->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
+    slot->start_health = ent->v.health;
     hook_override_ticks = -1;
     hook_override_aim = -1.0f;
     /* The class's own prefix is not always its classname (the Enforcer's

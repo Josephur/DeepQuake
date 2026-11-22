@@ -22,7 +22,6 @@ add_library(quakespasm_server OBJECT
   ${QS_DIR}/host.c
   ${QS_DIR}/host_cmd.c
   ${QS_DIR}/mathlib.c
-  ${QS_DIR}/pr_cmds.c
   ${QS_DIR}/pr_edict.c
   ${QS_DIR}/pr_exec.c
   ${QS_DIR}/strlcat.c
@@ -44,6 +43,23 @@ target_compile_definitions(quakespasm_server PRIVATE
 set_target_properties(quakespasm_server PROPERTIES C_EXTENSIONS ON)
 target_compile_options(quakespasm_server PRIVATE -w -fno-strict-aliasing)
 
+# pr_cmds.c alone (RETRAIN_SPEC part 0B): its QuakeC sound and temp-entity
+# writes are routed through the hearing wrappers in src/brain_hook.c, which
+# classify them and hand them to every nominated monster before calling the
+# real functions. The vendored file itself is unmodified: the renames act on
+# the declarations in server.h and common.h that this file already includes.
+add_library(quakespasm_cmds OBJECT ${QS_DIR}/pr_cmds.c)
+target_include_directories(quakespasm_cmds PRIVATE ${DQSIM_ENGINE_INCLUDES})
+target_compile_definitions(quakespasm_cmds PRIVATE
+  USE_SDL2
+  rand=dqsim_rand
+  SV_StartSound=dq_hear_start_sound
+  MSG_WriteByte=dq_hear_write_byte
+  MSG_WriteCoord=dq_hear_write_coord
+)
+set_target_properties(quakespasm_cmds PROPERTIES C_EXTENSIONS ON)
+target_compile_options(quakespasm_cmds PRIVATE -w -fno-strict-aliasing)
+
 # sv_phys.c is the one vendored file compiled differently (#31): every
 # QuakeC program execution it initiates (thinks, touches, the player and
 # frame thinks) is routed to the brain hook in src/dqsim.c, which passes
@@ -55,6 +71,9 @@ target_compile_definitions(quakespasm_phys PRIVATE
   USE_SDL2
   rand=dqsim_rand
   PR_ExecuteProgram=dqsim_hook_execute_program
+  # sv_phys.c calls SV_StartSound directly (water splashes, the Fiend's
+  # landing); the simulator hears those through the same wrappers (0B).
+  SV_StartSound=dq_hear_start_sound
 )
 set_target_properties(quakespasm_phys PROPERTIES C_EXTENSIONS ON)
 target_compile_options(quakespasm_phys PRIVATE -w -fno-strict-aliasing)
@@ -68,6 +87,7 @@ add_library(dqsim SHARED
   src/platform.c
   src/rng.c
   $<TARGET_OBJECTS:quakespasm_server>
+  $<TARGET_OBJECTS:quakespasm_cmds>
   $<TARGET_OBJECTS:quakespasm_phys>
 )
 set_target_properties(dqsim PROPERTIES C_EXTENSIONS ON)
@@ -199,8 +219,12 @@ if(DQSIM_ONNXRUNTIME_FOUND)
   # The hooked sv_phys (#43): the client's Grunt decisions come from the
   # policy instead of QuakeC, exactly as in the simulator. Without a
   # model the hook is never nominated and play is stock (#44).
+  # Hearing (RETRAIN_SPEC part 0B): the client's QuakeC sound and temp-entity
+  # writes go through the same wrappers as the simulator's.
   set_source_files_properties(${QS_DIR}/sv_phys.c PROPERTIES
-    COMPILE_DEFINITIONS PR_ExecuteProgram=dqsim_hook_execute_program)
+    COMPILE_DEFINITIONS "PR_ExecuteProgram=dqsim_hook_execute_program;SV_StartSound=dq_hear_start_sound")
+  set_source_files_properties(${QS_DIR}/pr_cmds.c PROPERTIES
+    COMPILE_DEFINITIONS "SV_StartSound=dq_hear_start_sound;MSG_WriteByte=dq_hear_write_byte;MSG_WriteCoord=dq_hear_write_coord")
 endif()
 # Fail the build on any undefined engine symbol, like the simulator does.
 target_link_options(deepquake PRIVATE -Wl,-z,defs)
