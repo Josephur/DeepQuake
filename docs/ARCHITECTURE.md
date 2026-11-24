@@ -200,7 +200,11 @@ settles on the policy's facing at rest. Both are kept in the edict
 carry them, and the stock attack states start from the policy's. An
 attack action with a visible player and QuakeC's `attack_finished`
 expired starts the monster's real QuakeC attack sequence, and attack,
-pain and death sequences always run under QuakeC.
+pain and death sequences always run under QuakeC. id's own game source
+for every class is vendored read-only at `engine/third_party/quakec_v101/`
+(its `UPSTREAM.md` maps each class to its file): it is the reference for
+what those states and attacks do, since the hook resolves them from the
+compiled progs at run time.
 
 **Melee needs reach (#63).** Each attack entry is classed as ranged (its
 state chain, or a chain a dispatcher such as `ogre_melee` can start,

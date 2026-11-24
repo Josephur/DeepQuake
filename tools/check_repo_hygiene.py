@@ -7,7 +7,8 @@ pre-commit hook, and the whole tree in CI):
 * Quake game data and trained weights, by name and by file signature;
 * files larger than the size limit;
 * likely secrets files;
-* vendored engine code that differs from upstream (see ``vendored_problems``);
+* vendored code (the engine, and the QuakeC reference) that differs from
+  upstream (see ``vendored_problems``);
 * a local fidelity reference checkout that is not pristine.
 
 Standard library only, so it runs before any environment is set up.
@@ -36,6 +37,10 @@ LOCAL_ONLY_DIRS = {"gamedata": {"gamedata/README.md"}, "models": {"models/README
 LOCAL_ONLY_TOP = {"runs", "checkpoints", "build"}
 
 VENDORED = "engine/third_party/quakespasm"
+# Every vendored directory, and whether its UPSTREAM.md may record local
+# patches. The engine code may (rarely); the QuakeC is a reference to read
+# and may not change at all.
+VENDORED_DIRS = {VENDORED: True, "engine/third_party/quakec_v101": False}
 REFERENCE = "engine/.fidelity/quakespasm"
 # A recorded local patch in UPSTREAM.md: - `Quake/file.c` sha256 `<digest>`: reason
 PATCH_LINE = re.compile(r"^- `([^`]+)` sha256 `([0-9a-f]{64})`", re.MULTILINE)
@@ -82,28 +87,32 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def vendored_problems(root: Path, tracked: list[str]) -> list[tuple[str, str]]:
-    """Vendored engine files must be byte-identical to upstream.
+def vendored_problems(
+    root: Path, tracked: list[str], vendored_name: str = VENDORED, patchable: bool = True
+) -> list[tuple[str, str]]:
+    """Vendored files must be byte-identical to upstream.
 
     ``SHA256SUMS`` next to ``UPSTREAM.md`` holds the upstream checksum of
     every vendored file. A file may differ only if it is a recorded local
     patch: ``UPSTREAM.md`` has a line naming the file and the checksum of the
     patched file, as ``- `Quake/<file>` sha256 `<64 hex digits>`: <reason>``,
     and the file contains the marker ``// DeepQuake:``. Trace or debug code
-    never qualifies; put it in a scratch copy (see AGENTS.md).
+    never qualifies; put it in a scratch copy (see AGENTS.md). A directory
+    that is not ``patchable`` has no such route: any difference is a problem.
     """
-    vendored = root / VENDORED
+    vendored = root / vendored_name
     manifest_path = vendored / "SHA256SUMS"
     if not manifest_path.is_file():
-        return [(f"{VENDORED}/SHA256SUMS", "checksum manifest is missing")]
+        return [(f"{vendored_name}/SHA256SUMS", "checksum manifest is missing")]
     manifest = {}
     for line in manifest_path.read_text().splitlines():
         digest, _, name = line.partition("  ")
         manifest[name] = digest
-    patches = dict(PATCH_LINE.findall((vendored / "UPSTREAM.md").read_text()))
+    notes = (vendored / "UPSTREAM.md").read_text() if (vendored / "UPSTREAM.md").is_file() else ""
+    patches = dict(PATCH_LINE.findall(notes)) if patchable else {}
 
     problems = []
-    prefix = VENDORED + "/"
+    prefix = vendored_name + "/"
     present = {name[len(prefix) :] for name in tracked if name.startswith(prefix)}
     present -= {"UPSTREAM.md", "SHA256SUMS"}
     for name in sorted(present - set(manifest)):
@@ -117,24 +126,25 @@ def vendored_problems(root: Path, tracked: list[str]) -> list[tuple[str, str]]:
         if actual == digest:
             continue
         if patches.get(name) != actual:
-            problems.append((prefix + name, "differs from upstream and is not a recorded patch; "
+            how = "is not a recorded patch" if patchable else "directory is read-only"
+            problems.append((prefix + name, f"differs from upstream ({how}); "
                              f"undo with: git checkout -- {prefix}{name}"))  # fmt: skip
         elif b"// DeepQuake:" not in path.read_bytes():
             problems.append((prefix + name, "recorded patch has no '// DeepQuake:' marker"))
     return problems
 
 
-def staged_vendored_problems(root: Path) -> list[tuple[str, str]]:
-    """The index must hold the same engine files as the working tree.
+def staged_vendored_problems(root: Path, vendored_name: str = VENDORED) -> list[tuple[str, str]]:
+    """The index must hold the same vendored files as the working tree.
 
     ``vendored_problems`` reads the files on disk; this closes the gap where
     a changed file is staged and then restored on disk.
     """
     out = subprocess.run(
-        ["git", "diff", "--name-only", "-z", "--", VENDORED],
+        ["git", "diff", "--name-only", "-z", "--", vendored_name],
         cwd=root, check=True, capture_output=True,
     ).stdout  # fmt: skip
-    own = {f"{VENDORED}/UPSTREAM.md", f"{VENDORED}/SHA256SUMS"}
+    own = {f"{vendored_name}/UPSTREAM.md", f"{vendored_name}/SHA256SUMS"}
     return [(name, "staged content differs from the file on disk; run: git add " + name)
             for name in out.decode().split("\0") if name and name not in own]  # fmt: skip
 
@@ -174,15 +184,20 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
     tracked = tracked_files(root)
     problems = [(name, reason) for name in tracked if (reason := check(root, name))]
-    guard = vendored_problems(root, tracked)
-    flagged = {name for name, _ in guard}
-    guard += [item for item in staged_vendored_problems(root) if item[0] not in flagged]
+    guard = []
+    for vendored, patchable in VENDORED_DIRS.items():
+        found = vendored_problems(root, tracked, vendored, patchable)
+        flagged = {name for name, _ in found}
+        guard += found
+        guard += [
+            item for item in staged_vendored_problems(root, vendored) if item[0] not in flagged
+        ]
     guard += reference_problems(root)
     for name, reason in problems + guard:
         print(f"hygiene: {name}: {reason}", file=sys.stderr)
     if guard:
         print(
-            f"\n{len(guard)} problem(s) with vendored engine code. It must match upstream: "
+            f"\n{len(guard)} problem(s) with vendored code. It must match upstream: "
             "see 'Vendored engine code is unmodified' in AGENTS.md.",
             file=sys.stderr,
         )

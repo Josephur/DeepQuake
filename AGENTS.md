@@ -131,6 +131,8 @@ engine/                 C. Headless simulator (libdqsim) and, later, the playabl
   tests/                C tests, run by ctest
   tools/                C programs built with the library (dqsim_bench)
   third_party/quakespasm/  Vendored QuakeSpasm server code, unmodified; see its UPSTREAM.md
+  third_party/quakec_v101/  id's original QuakeC game source, unmodified and read-only:
+                              the reference for how a monster's states and attacks are built
 python/deepquake/       Python package
   sim.py                Bindings for libdqsim (one simulator per process)
   gamedata.py           Find, check and link the user's game data
@@ -297,6 +299,13 @@ The issue tracker is the project's history. Use the `gh` CLI.
 
 - **C**: C11, `-Wall -Wextra -Werror` for our code (not for `third_party/`).
   Public symbols are prefixed `dqsim_`.
+- **Read the monster's own QuakeC before changing how the hook treats it.**
+  `engine/third_party/quakec_v101/` is id's original game source, vendored
+  read-only; its `UPSTREAM.md` maps each class to its file. The hook
+  resolves attack chains from the compiled progs at run time, so the source
+  says exactly what it has to follow: which state calls what, and what a
+  function stores on an entity it spawns. Never edit it. The hygiene check
+  refuses any change, and this directory has no recorded-patch route.
 - **Vendored engine code is unmodified.** When the engine needs to behave
   differently, first try a stub in `engine/src/client_stubs.c`, a shim header
   in `engine/src/shim/`, or a compile definition in `engine/CMakeLists.txt`.
