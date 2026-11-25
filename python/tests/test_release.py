@@ -51,7 +51,18 @@ def _manifest_for(files: dict[str, bytes], *, corrupt: bool = False) -> dict:
     }
 
 
-def _write_fight_check(run, classes, *, kill_rate=0.9, facing=0.9, sha=None, passed=None):
+def _write_fight_check(
+    run,
+    classes,
+    *,
+    kill_rate=0.9,
+    facing=0.9,
+    sha=None,
+    passed=None,
+    stage=1,
+    idle_kill=0.0,
+    idle_damage=0.0,
+):
     """A fight-check report for ``run``'s checkpoint with the given numbers."""
     from deepquake import fight_check
 
@@ -65,10 +76,18 @@ def _write_fight_check(run, classes, *, kill_rate=0.9, facing=0.9, sha=None, pas
     report = {
         "version": fight_check.REPORT_VERSION,
         "checkpoint_sha256": sha or fight_check.sha256_file(run / "checkpoint.pt"),
+        "stage": stage,
         "classes": {
             name: {
                 "reference": dict(side),
                 "checkpoint": {**side, "kill_rate": kill_rate, "facing_fraction": facing},
+                "idle": {
+                    "usable_tasks": 20,
+                    "kill_rate": idle_kill,
+                    "damage_rate": idle_damage,
+                    "facing_fraction": 0.0,
+                    "sight_decisions": 500,
+                },
             }
             for name in classes
         },
@@ -125,6 +144,133 @@ def test_the_fight_check_cannot_pass_a_class_its_reference_cannot_measure():
     # 60% of the reference's rate is the bar, whatever the reference's rate is.
     assert fight_check.judge_class({**good, "kill_rate": 0.54}, good) == []
     assert fight_check.judge_class({**good, "kill_rate": 0.5}, good) != []
+
+
+def test_a_checkpoint_from_before_the_spec_is_refused(tmp_path, monkeypatch):
+    """The report says which stage of docs/RETRAIN_SPEC.md trained the
+    checkpoint. One with no stage cannot be judged (retrain spec part 0E)."""
+    pytest.importorskip("torch", reason="needs the 'train' extra: uv sync --extra train")
+    import sys
+
+    from deepquake import fight_check, monster, monster_env, ppo
+
+    good = {"usable_tasks": 20, "kill_rate": 0.9, "damage_rate": 1.0, "facing_fraction": 0.9}
+    calm = {"usable_tasks": 20, "kill_rate": 0.0, "damage_rate": 0.0}
+    report = {
+        "version": fight_check.REPORT_VERSION,
+        "checkpoint_sha256": "0" * 64,
+        "classes": {
+            "monster_army": {"checkpoint": good, "reference": good, "random": good, "idle": calm}
+        },
+    }
+    assert fight_check.judge({**report, "stage": 1}, ["monster_army"]) == {}
+    with pytest.raises(SystemExit, match="before docs/RETRAIN_SPEC.md"):
+        fight_check.judge(report, ["monster_army"])
+
+    # The release tool's gate refuses it before it looks at any number.
+    run = tmp_path / "old"
+    run.mkdir()
+    (run / "checkpoint.pt").write_bytes(b"trained long ago")
+    report["checkpoint_sha256"] = fight_check.sha256_file(run / "checkpoint.pt")
+    (run / fight_check.REPORT_NAME).write_text(json.dumps(report))
+    with pytest.raises(SystemExit, match="before docs/RETRAIN_SPEC.md"):
+        fight_check.require_passing_report(run / "checkpoint.pt", ["monster_army"])
+
+    # And the check itself refuses such a checkpoint before measuring anything.
+    ppo.seed_everything(75)
+    model = ppo.ActorCritic(
+        monster.MONSTER_OBS_DIM, monster_env.MONSTER_ACTION_NVEC, hidden=8, n_types=1
+    )
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    ppo.save_checkpoint(stale / "checkpoint.pt", model, None, {"monsters": ["monster_army"]})
+    monkeypatch.setattr(sys, "argv", ["fight_check", str(stale / "checkpoint.pt")])
+    with pytest.raises(SystemExit, match="before docs/RETRAIN_SPEC.md"):
+        fight_check.main()
+    assert not (stale / fight_check.REPORT_NAME).exists()
+
+
+def test_the_report_says_whether_a_probe_map_was_trained_on():
+    """Each class's probe map is a training map, a held-out one or neither,
+    as the checkpoint records it."""
+    from deepquake import fight_check
+
+    checkpoint = {"maps": ["e1m1", "e1m2"], "held_out": ["e2m1"]}
+    assert fight_check.probe_split("e1m1", checkpoint) == "training"
+    assert fight_check.probe_split("e2m1", checkpoint) == "held_out"
+    assert fight_check.probe_split("e3m1", checkpoint) == "unlisted"
+    assert fight_check.probe_split("e1m1", {}) == "unlisted"
+
+
+def test_the_idle_control_unmeasures_a_map_the_level_fights_on(tmp_path):
+    """A monster that never moves or attacks must all but leave the standing
+    player alone on a map used to measure a class (retrain spec part 0E)."""
+    from deepquake import fight_check
+
+    good = {"usable_tasks": 20, "kill_rate": 0.9, "damage_rate": 1.0, "facing_fraction": 0.9}
+    at_the_limits = {
+        "usable_tasks": 20,
+        "kill_rate": fight_check.IDLE_KILL_LIMIT,
+        "damage_rate": fight_check.IDLE_DAMAGE_LIMIT,
+    }
+    assert fight_check.IDLE_KILL_LIMIT == 0.05 and fight_check.IDLE_DAMAGE_LIMIT == 0.10
+    assert fight_check.probe_verdict(good, at_the_limits) == []
+    assert fight_check.judge_class(good, good, at_the_limits) == []
+    # Above either limit, by however little.
+    killing = fight_check.probe_verdict(good, {**at_the_limits, "kill_rate": 0.06})
+    assert len(killing) == 1 and "level is doing the fighting" in killing[0]
+    hurting = fight_check.probe_verdict(good, {**at_the_limits, "damage_rate": 0.11})
+    assert len(hurting) == 1 and "level is doing the fighting" in hurting[0]
+    # It outranks the checkpoint's own numbers: beating the reference on such
+    # a map is still unmeasured.
+    busy = {"usable_tasks": 20, "kill_rate": 0.0, "damage_rate": 0.5}
+    assert fight_check.judge_class(good, good, busy) == [fight_check.probe_verdict(good, busy)[0]]
+    assert "unmeasured" in fight_check.judge_class(good, good, busy)[0]
+
+    # A report without the idle column cannot pass either.
+    report = {
+        "version": fight_check.REPORT_VERSION,
+        "stage": 1,
+        "classes": {"monster_army": {"checkpoint": good, "reference": good, "random": good}},
+    }
+    assert fight_check.judge(report, ["monster_army"]) == {
+        "monster_army": ["unmeasured: the idle control was not played on this map"]
+    }
+    report["classes"]["monster_army"]["idle"] = at_the_limits
+    assert fight_check.judge(report, ["monster_army"]) == {}
+    report["classes"]["monster_army"]["idle"] = busy
+    assert (
+        "level is doing the fighting"
+        in fight_check.judge(report, ["monster_army"])["monster_army"][0]
+    )
+
+    # And the release tool's gate refuses a model checked on such a map.
+    run = tmp_path / "busy"
+    run.mkdir()
+    (run / "checkpoint.pt").write_bytes(b"a model")
+    _write_fight_check(run, ["monster_army"], idle_damage=0.5)
+    with pytest.raises(SystemExit, match="level is doing the fighting"):
+        fight_check.require_passing_report(run / "checkpoint.pt", ["monster_army"])
+
+
+def test_the_bars_options_are_checked_before_anything_is_measured(monkeypatch):
+    """--bars takes no checkpoint and no stage the spec has no probe for; --classes goes with it."""
+    import sys
+
+    from deepquake import fight_check
+
+    def run(*argv):
+        monkeypatch.setattr(sys, "argv", ["fight_check", *argv])
+        with pytest.raises(SystemExit) as stopped:
+            fight_check.main()
+        return stopped.value.code
+
+    assert run() == 2  # neither a checkpoint nor --bars
+    assert run("--bars", "0", "some.pt") == 2
+    assert run("some.pt", "--classes", "monster_army") == 2
+    assert run("--bars", "1") == 2  # no stage of the spec adds a probe there yet
+    assert fight_check.probes_up_to(0) == ("sight",)
+    assert fight_check.CLASS_MAPS["monster_wizard"] == ("e3m5", "e4m3")
 
 
 def test_the_manifest_checksums_the_class_map(tmp_path):

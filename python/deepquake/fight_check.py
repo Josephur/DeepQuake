@@ -1,6 +1,7 @@
 """Does a trained monster model fight a player it can see? (#65)
 
     uv run python -m deepquake.fight_check runs/<name>/checkpoint.pt
+    uv run python -m deepquake.fight_check --bars STAGE [--classes NAME ...]
 
 The check a model must pass before :mod:`deepquake.release_model` will
 stage it. It exists because win rates did not catch models-v9: its
@@ -25,7 +26,12 @@ A class passes when all of these hold (the constants below):
   reference's rate;
 - while the player is in sight, the monster's shown facing is within
   :data:`FACING_DEGREES` of the player on at least :data:`FACING_FRACTION`
-  of decisions.
+  of decisions;
+- the level is not doing the fighting: an **idle** brain, which never moves
+  and never attacks, is played on the same tasks, and it kills the standing
+  player in at most :data:`IDLE_KILL_LIMIT` of them and hurts the player in
+  at most :data:`IDLE_DAMAGE_LIMIT`. Otherwise the map cannot measure the
+  class, and the class **fails as unmeasured** on it.
 
 The report also plays the same tasks with **random** actions. That column
 is not part of the verdict, and it is the most important thing to read:
@@ -38,7 +44,17 @@ anything. A model whose numbers match the random column has not.
 
 The model passes when every class passes. The report,
 ``fight_check.json`` beside the checkpoint, carries the checkpoint's
-SHA-256, so it vouches for that file and no other.
+SHA-256, so it vouches for that file and no other. It also records which
+stage of ``docs/RETRAIN_SPEC.md`` trained the checkpoint, and for every
+class whether its probe map was one that checkpoint trained on or a
+held-out one. A checkpoint that records no stage predates the spec and is
+refused.
+
+Without a checkpoint, ``--bars STAGE`` plays only the reference, random and
+idle brains on the probes up to ``STAGE`` and writes
+``runs/fight_bars/stage<STAGE>.json``: the bars a stage's checkpoint will
+be measured against, recorded before its training run. ``--classes`` names
+the classes to measure; without it, every class with a probe map.
 
 The thresholds and the probe are the maintainer's to change, not the
 trainer's: a run that fails has a model that does not fight, and the fix
@@ -59,7 +75,7 @@ import numpy as np
 from . import monster_env, nav, sim
 
 REPORT_NAME = "fight_check.json"
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 
 #: The reference must kill the standing player this often for a class to be
 #: measurable at all.
@@ -83,6 +99,17 @@ MAX_DISTANCE = 350.0
 #: One decision in twelve a second: 30 seconds to kill a target that does
 #: not fight back.
 TIMEOUT_STEPS = 360
+#: The idle control (RETRAIN_SPEC part 0E): a monster that never moves and
+#: never attacks is played on the same tasks, and a map where it kills the
+#: standing player more often than this...
+IDLE_KILL_LIMIT = 0.05
+#: ...or hurts the player more often than this cannot measure a class: the
+#: level is doing the fighting.
+IDLE_DAMAGE_LIMIT = 0.10
+#: The probes each stage of the retrain spec adds to the check. A stage's
+#: checkpoint must pass every probe up to its own; the sight probe, the one
+#: above, is all stage 0 has.
+PROBES = {0: ("sight",)}
 
 #: A level that stocks each class, in order of preference.
 CLASS_MAPS = {
@@ -95,7 +122,23 @@ CLASS_MAPS = {
     "monster_knight": ("e1m4", "e1m5"),
     "monster_demon1": ("e2m5", "e2m4"),
     "monster_shambler": ("e1m8", "e1m3"),
+    "monster_wizard": ("e3m5", "e4m3"),
 }
+
+
+def probes_up_to(stage: int) -> tuple[str, ...]:
+    """Every probe the stages up to ``stage`` add, earliest stage first."""
+    return tuple(name for added in sorted(PROBES) if added <= stage for name in PROBES[added])
+
+
+def probe_split(map_name: str, checkpoint: dict) -> str:
+    """Whether a probe map is one the checkpoint trained on, a held-out one
+    (neither list is recorded as ``maps`` and ``held_out``), or neither."""
+    if map_name in (checkpoint.get("held_out") or []):
+        return "held_out"
+    if map_name in (checkpoint.get("maps") or []):
+        return "training"
+    return "unlisted"
 
 
 def sha256_file(path: Path) -> str:
@@ -233,19 +276,44 @@ def run_class(
     }
 
 
-def judge_class(policy: dict, reference: dict) -> list[str]:
-    """Why this class fails; empty when it passes."""
+def probe_verdict(reference: dict, idle: dict | None = None) -> list[str]:
+    """Why a probe map cannot measure a class; empty when it can.
+
+    The scripted reference must have enough tasks it can start, and must
+    kill in them; and the level must not do the fighting by itself.
+    """
     reasons = []
     if reference["usable_tasks"] < MIN_USABLE:
-        return [
+        reasons.append(
             f"unmeasured: only {reference['usable_tasks']} tasks start with the player in "
             f"sight (need {MIN_USABLE})"
-        ]
+        )
     if reference["kill_rate"] < REFERENCE_FLOOR:
-        return [
+        reasons.append(
             f"unmeasured: the scripted reference kills in only {reference['kill_rate']:.0%} of "
             f"tasks (need {REFERENCE_FLOOR:.0%}), so the probe says nothing about this class"
-        ]
+        )
+    if idle is not None and (
+        idle["kill_rate"] > IDLE_KILL_LIMIT or idle["damage_rate"] > IDLE_DAMAGE_LIMIT
+    ):
+        reasons.append(
+            f"unmeasured: a monster that never moves or attacks kills the standing player in "
+            f"{idle['kill_rate']:.0%} of tasks and hurts it in {idle['damage_rate']:.0%} "
+            f"(need at most {IDLE_KILL_LIMIT:.0%} and {IDLE_DAMAGE_LIMIT:.0%}), so the level "
+            f"is doing the fighting on this map"
+        )
+    return reasons
+
+
+def judge_class(policy: dict, reference: dict, idle: dict | None = None) -> list[str]:
+    """Why this class fails; empty when it passes.
+
+    ``idle`` is the idle control on the same map (see :func:`probe_verdict`);
+    without one, only the map's own limits are checked.
+    """
+    reasons = probe_verdict(reference, idle)
+    if reasons:
+        return reasons
     needed = KILL_FRACTION * reference["kill_rate"]
     if policy["kill_rate"] < needed:
         reasons.append(
@@ -260,15 +328,29 @@ def judge_class(policy: dict, reference: dict) -> list[str]:
     return reasons
 
 
+def _require_stage(report: dict) -> None:
+    """Refuse a checkpoint that records no spec stage: it was trained before
+    ``docs/RETRAIN_SPEC.md``, and the check's stages do not apply to it."""
+    if report.get("stage") is None:
+        raise SystemExit(
+            "this checkpoint was trained before docs/RETRAIN_SPEC.md: it records no stage, "
+            "so the fight check cannot judge it"
+        )
+
+
 def judge(report: dict, classes: list[str]) -> dict[str, list[str]]:
     """Failure reasons per class, for the classes a model must cover."""
+    _require_stage(report)
     failures: dict[str, list[str]] = {}
     for classname in classes:
         measured = report.get("classes", {}).get(classname)
         if measured is None:
             failures[classname] = ["not measured"]
             continue
-        reasons = judge_class(measured["checkpoint"], measured["reference"])
+        if "idle" not in measured:
+            failures[classname] = ["unmeasured: the idle control was not played on this map"]
+            continue
+        reasons = judge_class(measured["checkpoint"], measured["reference"], measured["idle"])
         if reasons:
             failures[classname] = reasons
     return failures
@@ -289,6 +371,7 @@ def require_passing_report(checkpoint: Path, classes: list[str]) -> None:
         raise SystemExit(f"{path} is from another version of the check. Run: {command}")
     if report.get("checkpoint_sha256") != sha256_file(checkpoint):
         raise SystemExit(f"{path} was made for a different checkpoint file. Run: {command}")
+    _require_stage(report)
     failures = judge(report, classes)
     if failures:
         lines = [f"  {name}: {reason}" for name, reasons in failures.items() for reason in reasons]
@@ -299,21 +382,118 @@ def require_passing_report(checkpoint: Path, classes: list[str]) -> None:
         )
 
 
+def _bars_table(report: dict, classes: list[str]) -> None:
+    print(
+        f"{'class':<22} {'map':<6} {'kills: ref':>10} {'random':>7} {'idle':>6} "
+        f"{'hurt: idle':>10} {'facing: ref':>11}  verdict"
+    )
+    for name in classes:
+        cells = report["classes"][name]
+        ref, rnd, idle = cells["reference"], cells["random"], cells["idle"]
+        print(
+            f"{name:<22} {cells['map']:<6} {ref['kill_rate']:>10.0%} {rnd['kill_rate']:>7.0%} "
+            f"{idle['kill_rate']:>6.0%} {idle['damage_rate']:>10.0%} "
+            f"{ref['facing_fraction']:>11.0%}  "
+            + ("measurable" if not cells["reasons"] else "UNMEASURABLE")
+        )
+    for name in classes:
+        for reason in report["classes"][name]["reasons"]:
+            print(f"  {name}: {reason}")
+
+
+def measure_bars(stage: int, classes: list[str], jobs: int) -> dict:
+    """The reference, random and idle brains on every probe up to ``stage``,
+    for each class on its first listed map: what a checkpoint of that stage
+    will be measured against."""
+    work = [(name, brain) for name in classes for brain in ("reference", "random", "idle")]
+    with ProcessPoolExecutor(max_workers=jobs) as pool:
+        futures = {
+            (name, brain): pool.submit(run_class, name, CLASS_MAPS[name][0], "", brain)
+            for name, brain in work
+        }
+        measured = {key: future.result() for key, future in futures.items()}
+    cells = {}
+    for name in classes:
+        reference, random, idle = (measured[(name, b)] for b in ("reference", "random", "idle"))
+        cells[name] = {
+            "map": CLASS_MAPS[name][0],
+            "reference": reference,
+            "random": random,
+            "idle": idle,
+            "reasons": probe_verdict(reference, idle),
+        }
+    return {
+        "version": REPORT_VERSION,
+        "stage": stage,
+        "probes": list(probes_up_to(stage)),
+        "thresholds": {
+            "reference_floor": REFERENCE_FLOOR,
+            "idle_kill_limit": IDLE_KILL_LIMIT,
+            "idle_damage_limit": IDLE_DAMAGE_LIMIT,
+            "episodes": EPISODES,
+            "min_usable": MIN_USABLE,
+            "skill": SKILL,
+            "seed": SEED,
+        },
+        "classes": cells,
+    }
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser.add_argument("checkpoint", type=Path, nargs="?")
+    parser.add_argument("--jobs", type=int, default=6, help="classes measured in parallel")
+    parser.add_argument(
+        "--bars",
+        type=int,
+        metavar="STAGE",
+        help="measure only the reference, random and idle brains on the probes up to "
+        "STAGE, with no checkpoint, and write runs/fight_bars/stage<STAGE>.json",
+    )
+    parser.add_argument(
+        "--classes", nargs="+", metavar="NAME", help="with --bars: the classes to measure"
+    )
+    args = parser.parse_args()
+    if args.bars is None and args.checkpoint is None:
+        parser.error("give a checkpoint, or --bars STAGE")
+    if args.bars is not None and args.checkpoint is not None:
+        parser.error("--bars takes no checkpoint")
+    if args.bars is None and args.classes:
+        parser.error("--classes goes with --bars")
+    if args.bars is not None and not 0 <= args.bars <= max(PROBES):
+        parser.error(f"--bars {args.bars}: no stage of the spec adds a probe there yet")
+
+    if args.bars is not None:
+        classes = args.classes or list(CLASS_MAPS)
+        unknown = [name for name in classes if name not in CLASS_MAPS]
+        if unknown:
+            raise SystemExit(f"no probe map is listed for {unknown}: add it to CLASS_MAPS")
+        report = measure_bars(args.bars, classes, args.jobs)
+        _bars_table(report, classes)
+        out_path = Path("runs/fight_bars") / f"stage{args.bars}.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2) + "\n")
+        print(f"wrote {out_path}")
+        unmeasured = [name for name in classes if report["classes"][name]["reasons"]]
+        print(
+            "Every class measurable on its listed map."
+            if not unmeasured
+            else "UNMEASURABLE on the listed map: " + ", ".join(unmeasured)
+        )
+        raise SystemExit(0 if not unmeasured else 1)
+
     from . import ppo  # torch
 
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--jobs", type=int, default=6, help="classes measured in parallel")
-    args = parser.parse_args()
-
     _, checkpoint = ppo.load_model(args.checkpoint)
+    # Refused before anything is measured: the check's stages mean nothing
+    # for a checkpoint trained before the spec.
+    _require_stage({"stage": checkpoint.get("stage")})
     classes = list(checkpoint.get("monsters") or ["monster_army"])
     unknown = [name for name in classes if name not in CLASS_MAPS]
     if unknown:
         raise SystemExit(f"no probe map is listed for {unknown}: add it to CLASS_MAPS")
 
-    brains = ("reference", "random", "checkpoint")
+    brains = ("reference", "random", "idle", "checkpoint")
     work = [(name, brain) for name in classes for brain in brains]
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         futures = {
@@ -328,41 +508,60 @@ def main() -> None:
         "version": REPORT_VERSION,
         "checkpoint": str(args.checkpoint),
         "checkpoint_sha256": sha256_file(args.checkpoint),
+        "stage": checkpoint.get("stage"),
         "thresholds": {
             "reference_floor": REFERENCE_FLOOR,
             "kill_fraction": KILL_FRACTION,
             "facing_degrees": FACING_DEGREES,
             "facing_fraction": FACING_FRACTION,
+            "idle_kill_limit": IDLE_KILL_LIMIT,
+            "idle_damage_limit": IDLE_DAMAGE_LIMIT,
             "episodes": EPISODES,
             "skill": SKILL,
             "seed": SEED,
         },
         "classes": {
             name: {
+                "map": CLASS_MAPS[name][0],
+                "probe_map": probe_split(CLASS_MAPS[name][0], checkpoint),
                 "checkpoint": measured[(name, "checkpoint")],
                 "reference": measured[(name, "reference")],
                 "random": measured[(name, "random")],
+                "idle": measured[(name, "idle")],
             }
             for name in classes
         },
     }
+    # A checkpoint with no stage is refused here, before any report is written.
     failures = judge(report, classes)
     report["failures"] = failures
     report["passed"] = not failures
 
     print(
-        f"{'class':<22} {'kills':>7} {'reference':>10} {'random':>7} "
+        f"{'class':<22} {'kills':>7} {'reference':>10} {'random':>7} {'idle':>6} "
         f"{'facing':>8} {'reference':>10} {'random':>7}  verdict"
     )
     for name in classes:
         cells = report["classes"][name]
-        mine, ref, rnd = cells["checkpoint"], cells["reference"], cells["random"]
+        mine, ref, rnd, idle = (
+            cells["checkpoint"],
+            cells["reference"],
+            cells["random"],
+            cells["idle"],
+        )
         print(
             f"{name:<22} {mine['kill_rate']:>7.0%} {ref['kill_rate']:>10.0%} "
-            f"{rnd['kill_rate']:>7.0%} {mine['facing_fraction']:>8.0%} "
+            f"{rnd['kill_rate']:>7.0%} {idle['kill_rate']:>6.0%} {mine['facing_fraction']:>8.0%} "
             f"{ref['facing_fraction']:>10.0%} {rnd['facing_fraction']:>7.0%}  "
             + ("FAIL" if name in failures else "pass")
         )
+    print(
+        f"stage {report['stage']}; probe maps: "
+        + ", ".join(
+            f"{name} {report['classes'][name]['map']} ({report['classes'][name]['probe_map']})"
+            for name in classes
+        )
+    )
     print(
         "The random column is random button presses in the same body. A model whose "
         "numbers match it has learned nothing this probe can see."
