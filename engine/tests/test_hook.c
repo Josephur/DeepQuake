@@ -777,6 +777,258 @@ static int ogre_throw_aim_error(void)
     return 0;
 }
 
+/* The Scrag through the hook (retrain spec part 0C): monster_wizard flies,
+ * so its drive is checked for drift as well as distance, and its shot is
+ * spawned as another entity's think, which today the hook does not reach. */
+static int wizard_drive(void)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+
+    /* The Scrags perch on e3m5's pillars, and the nearest one's perch has
+     * no room for a 50-unit walk: sweep the candidates until one moves
+     * the distance, as class_speeds does. */
+    CHECK(dqsim_load_map("e3m5", 2, 23) == DQSIM_OK, "load e3m5");
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "notarget tick");
+    int count = dqsim_get_entities(entities, 2048);
+    CHECK(count > 0, "get entities");
+    for (int pick = 0; pick < count; pick++) {
+        if (strcmp(entities[pick].classname, "monster_wizard") != 0)
+            continue;
+        int idx = entities[pick].index;
+        if (dqsim_set_policy_hook(idx, driven_policy, NULL) != DQSIM_OK)
+            continue;
+        driven_calls = 0;
+        driven_mode = 0;
+        driven_saw_ever = 0;
+        driven_turn_to = 0;
+        float start[3];
+        memcpy(start, entities[pick].origin, sizeof(start));
+        driven_mode = 1;
+        CHECK(dqsim_step_repeat(&idle, 72 * 2) == DQSIM_OK, "scrag forward");
+        driven_mode = 0;
+        int count2 = dqsim_get_entities(entities, 2048);
+        int found = 0;
+        float moved = 0, height = 0;
+        for (int i = 0; i < count2; i++)
+            if (entities[i].index == idx) {
+                found = 1;
+                for (int k = 0; k < 2; k++) {
+                    float delta = entities[i].origin[k] - start[k];
+                    moved += delta * delta;
+                }
+                height = fabsf(entities[i].origin[2] - start[2]);
+            }
+        CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+        if (!found)
+            continue;
+        printf("scrag pick %d: moved %.0f units in 2 s, height drift %.1f\n", idx,
+               sqrtf(moved), height);
+        if (sqrtf(moved) > 50.0f && height < 32.0f) {
+            printf("scrag: moved %.0f units in 2 s, height drift %.1f\n", sqrtf(moved),
+                   height);
+            return 0;
+        }
+    }
+    CHECK(0, "no scrag walked 50 units in 2 s");
+    return 1;
+}
+
+/* The player let down onto the ground after a teleport: 1 when it landed
+ * alive and well enough to be shot at, 0 when it was still falling, was hurt
+ * too hard by the landing or died. */
+static int player_lands(void)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+
+    for (int tick = 0; tick < 180; tick++) {
+        driven_saw_player = 0;
+        if (dqsim_step_repeat(&idle, 1) != DQSIM_OK)
+            return 0;
+        if (dqsim_get_player(&player) != DQSIM_OK)
+            return 0;
+        if (player.on_ground)
+            return player.health >= 60.0f;
+        if (player.health <= 0.0f)
+            return 0;
+    }
+    return 0;
+}
+
+/* A Scrag with the player standing on the ground in its sight, at a spot
+ * 300 units ahead of it. The Scrags perch on e3m5's pillars, so few of
+ * their perches have a sight line a player can occupy, and a spot 300 units
+ * ahead at the Scrag's own height is in mid-air: the player falls from it
+ * (measured: 590 units, taking fall damage), and a spike aimed at a falling
+ * player misses. So sweep the candidates like wizard_drive does, and at
+ * each spot let the player land before asking whether the Scrag still sees
+ * it. */
+static int wizard_sight_start(int *index)
+{
+    static dqsim_entity entities[2048];
+    const dqsim_action idle = {0};
+
+    CHECK(dqsim_load_map("e3m5", 2, 23) == DQSIM_OK, "load e3m5");
+    CHECK(dqsim_client_command("notarget") == DQSIM_OK, "notarget");
+    CHECK(dqsim_step_repeat(&idle, 2) == DQSIM_OK, "notarget tick");
+    int count = dqsim_get_entities(entities, 2048);
+    CHECK(count > 0, "get entities");
+    for (int pick = 0; pick < count; pick++) {
+        if (strcmp(entities[pick].classname, "monster_wizard") != 0)
+            continue;
+        int idx = entities[pick].index;
+        if (dqsim_set_policy_hook(idx, driven_policy, NULL) != DQSIM_OK)
+            continue;
+        driven_calls = 0;
+        driven_mode = 0;
+        driven_saw_ever = 0;
+        driven_turn_to = 0;
+        for (int tick = 0; tick < 12; tick++)
+            CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "scrag settle");
+        CHECK(driven_calls >= 5, "the scrag was asked for %d decisions in 12 ticks",
+              driven_calls);
+
+        int placed = 0;
+        for (int k = 0; k < 24 && !placed; k++) {
+            if (!place_player_ahead(driven_origin, driven_yaw + (float)(k * 15), 300.0f))
+                continue;
+            if (!player_lands())
+                continue;
+            driven_mode = 0;
+            driven_saw_ever = 0;
+            for (int tick = 0; tick < 12 && !placed; tick++) {
+                driven_saw_player = 0;
+                CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "sight tick");
+                if (driven_saw_ever)
+                    placed = 1;
+            }
+        }
+        if (placed) {
+            *index = idx;
+            return 0;
+        }
+        CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    }
+    CHECK(0, "no scrag sees a landed player from a spot 300 units ahead of it");
+    return 1;
+}
+
+/* The health the player loses over `ticks` with the driven monster in
+ * `mode`, stopping early once the player is dead. */
+static float player_damage_over(int mode, int ticks)
+{
+    dqsim_player_state player;
+    const dqsim_action idle = {0};
+
+    CHECK(dqsim_get_player(&player) == DQSIM_OK, "player before the run");
+    float before = player.health;
+    driven_mode = mode;
+    for (int tick = 0; tick < ticks && player.health > 0.0f; tick++) {
+        CHECK(dqsim_step_repeat(&idle, 1) == DQSIM_OK, "run tick");
+        CHECK(dqsim_get_player(&player) == DQSIM_OK, "player during the run");
+    }
+    driven_mode = 0;
+    return before - player.health;
+}
+
+/* The ranged attack: in sight at 300 units with the attack held, the player
+ * takes the shot's damage within 6 s. The damage the ATTACK causes is the
+ * difference between two plays of one saved episode, attack held and not:
+ * the map hurts a player by itself (measured: 5 fall damage while the
+ * Scrag never attacked), so "the player lost health" alone passes without
+ * any shot. One Scrag spike takes 9 health (spike_touch), and an attack
+ * launches two. No aim error and no reaction delay, as the other classes'
+ * attack tests have it: at the skill's 3 degrees a spike often misses. */
+static int wizard_attack(void)
+{
+    int index;
+    if (wizard_sight_start(&index))
+        return 1;
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+
+    /* How far the Scrag is from the landed player: it perches above the
+     * spot, so this is more than the 300 units ahead of it. driven_origin
+     * is the Scrag's, as its last decision reported it. */
+    dqsim_player_state player;
+    float range = -1.0f;
+    if (dqsim_get_player(&player) == DQSIM_OK)
+        range = flat_distance(driven_origin, player.origin);
+    dqsim_snapshot *snap = NULL;
+    CHECK(dqsim_snapshot_save(&snap) == DQSIM_OK, "save the snapshot: %s", dqsim_last_error());
+    float held = player_damage_over(3, 72 * 6);
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore: %s", dqsim_last_error());
+    float unheld = player_damage_over(0, 72 * 6);
+    free(snap);
+    printf("scrag: in 6 s with the attack held the player lost %.0f health, %.0f without "
+           "it (player %.0f units away, on the ground)\n",
+           held, unheld, range);
+    CHECK(held - unheld >= 9.0f,
+          "the scrag's attack cost the player %.0f health in 6 s, under one spike's 9: its "
+          "attack chain does not run under the hook",
+          held - unheld);
+    /* The skill's schedule again, for whatever runs after. */
+    CHECK(dqsim_set_handicap_override(-1, -1.0f) == DQSIM_OK, "aim error override cleared: %s",
+          dqsim_last_error());
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
+/* The aim error has to reach the shot. The spike is aimed in Wiz_FastFire,
+ * which runs as the spawned carrier's think (Wiz_StartFast stores it there
+ * and copies the wizard's enemy onto the carrier): the nominated monster's
+ * own rule could not reach it. Three plays of one saved episode: the attack
+ * with a 45 degree aim error, the attack with none, and no attack.
+ *
+ * The error is measured at 45 degrees for a reason: the two spikes of one
+ * attack pass 13 units either side of the player (Wiz_FastFire subtracts
+ * 13 times the carrier's side from the enemy's origin), and the player is
+ * 32 wide, so an error that moves the aim by less than about 3 units still
+ * lands a spike. */
+static int wizard_aim_error(void)
+{
+    int index;
+    if (wizard_sight_start(&index))
+        return 1;
+
+    dqsim_snapshot *snap = NULL;
+    CHECK(dqsim_snapshot_save(&snap) == DQSIM_OK, "save the snapshot: %s", dqsim_last_error());
+
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore for the error run: %s",
+          dqsim_last_error());
+    CHECK(dqsim_set_handicap_override(0, 45.0f) == DQSIM_OK, "aim error override: %s",
+          dqsim_last_error());
+    float errored = player_damage_over(3, 72 * 4);
+
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore for the clean run: %s",
+          dqsim_last_error());
+    CHECK(dqsim_set_handicap_override(0, 0.0f) == DQSIM_OK, "aim error override off: %s",
+          dqsim_last_error());
+    float clean = player_damage_over(3, 72 * 4);
+
+    CHECK(dqsim_snapshot_restore(snap) == DQSIM_OK, "restore for the run without the attack: %s",
+          dqsim_last_error());
+    float unheld = player_damage_over(0, 72 * 4);
+    free(snap);
+    printf("scrag: in 4 s at 300 units the attack cost the player %.0f health with a 45 degree "
+           "aim error, %.0f with none\n",
+           errored - unheld, clean - unheld);
+    /* The skill's schedule again, for whatever runs after. */
+    CHECK(dqsim_set_handicap_override(-1, -1.0f) == DQSIM_OK, "aim error override cleared: %s",
+          dqsim_last_error());
+    CHECK(errored - unheld < 5.0f,
+          "the scrag's attack cost the player %.0f health with a 45 degree aim error",
+          errored - unheld);
+    CHECK(clean - unheld >= 9.0f,
+          "the scrag's attack cost the player %.0f health with no aim error, under one spike's "
+          "9",
+          clean - unheld);
+    CHECK(dqsim_clear_policy_hook() == DQSIM_OK, "clear hook");
+    return 0;
+}
+
 /* A fifth class through the same hook (#55): the Hell Knight's prefix is
  * "hknight_" and its ranged attack is the magic missile, fired by
  * "hknight_shot" from its th_missile chain. The melee axe runs from
@@ -3171,10 +3423,24 @@ static int class_speeds(void)
     return result;
 }
 
+/* The Scrag's three tests (RETRAIN_SPEC part 0C), each on its own: one
+ * failing must not hide what the others measured. */
+static int scrag_tests(void)
+{
+    int failed = 0;
+    if (wizard_drive())
+        failed = 1;
+    if (wizard_attack())
+        failed = 1;
+    if (wizard_aim_error())
+        failed = 1;
+    return failed;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: test_hook <gamedata-dir>\n");
+        fprintf(stderr, "usage: test_hook <gamedata-dir> [scrag]\n");
         return 77;
     }
     char pak[1024];
@@ -3189,6 +3455,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "dqsim_init: %s\n", dqsim_last_error());
         return 1;
     }
+
+    /* `test_hook <gamedata-dir> scrag` runs only the Scrag's tests: the whole
+     * suite takes about ten minutes, and these are iterated on alone. */
+    if (argc >= 3 && strcmp(argv[2], "scrag") == 0)
+        return scrag_tests();
 
     uint64_t first = scenario();
     if (!first)
@@ -3223,6 +3494,8 @@ int main(int argc, char **argv)
         melee_needs_reach("e1m1", "monster_dog", 350.0f, 48, 59) ||
         melee_needs_reach("e2m5", "monster_demon1", 350.0f, 21, 26) ||
         melee_needs_reach("e1m4", "monster_knight", 350.0f, 9, 16))
+        return 1;
+    if (scrag_tests())
         return 1;
 
     printf("hook scenario hash %" PRIu64 ", many-monster hash %" PRIu64 "\n", first,

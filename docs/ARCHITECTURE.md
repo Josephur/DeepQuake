@@ -178,9 +178,12 @@ to, nearest first) and returns an action: a turn in degrees, spread over
 the decision's ticks and each tick measured from the facing the hook
 reports then — so a turn QuakeC's attack states made is kept instead of
 being turned back to a stale heading (RETRAIN_SPEC part 0A) — plus
-forward/side speeds and an attack flag. Movement is applied as ground
-steps or air
-velocity at that same point in the tick, capped at the body's own speed:
+forward/side speeds and an attack flag. Movement is applied at that same
+point in the tick as steps (`SV_movestep`) for a monster on the ground,
+flying or swimming — the step physics never applies those monsters'
+velocity, and for a flyer the step is a straight traced move, so a perched
+Scrag keeps its perch — or as air velocity for an airborne walker, in
+either case capped at the body's own speed:
 the average of the distances the class's walk and run states pass to
 `ai_walk` and `ai_run` (a Grunt walks at 18 units a second and runs at
 109, a Dog runs at about 330). The monster walks, in its walk frames,
@@ -206,10 +209,18 @@ for every class is vendored read-only at `engine/third_party/quakec_v101/`
 what those states and attacks do, since the hook resolves them from the
 compiled progs at run time.
 
-**Melee needs reach (#63).** Each attack entry is classed as ranged (its
-state chain, or a chain a dispatcher such as `ogre_melee` can start,
-reaches a projectile or the Shambler's `CastLightning`) or melee
-(everything else). A ranged entry starts at any distance. A melee entry
+**Melee needs reach (#63).** Each attack entry is classed as ranged or
+melee by one walk of its QuakeC (`walk_attack_chain`, retrain spec part
+0C): a state frame leads to the next frame of its chain, and a plain
+function with no state of its own is a dispatcher (`ogre_melee`, the
+Scrag's `Wiz_Missile`) that leads to each QuakeC function it calls. The
+entry is ranged when the walk finds a shot, and melee otherwise. A shot is
+a call to a shot-named function (`hknight_shot`, the Ogre's
+`OgreFireGrenade`, the Shambler's `CastLightning`), or a function that
+spawns an entity whose think fires one: the Scrag's `Wiz_StartFast` gives
+two carriers `think = Wiz_FastFire`. Before this walk the Scrag's entry
+resolved to nothing and it never attacked. A ranged entry starts at any
+distance. A melee entry
 starts only when the player is within reach: flat distance at most the
 monster's half width plus 48 units (64 for a Grunt-sized monster, 80 for
 an Ogre-sized one) and no more than 64 units above or below. Asked to
@@ -289,7 +300,14 @@ is aimed — the enemy's origin, from the firing frame. A class whose chain
 fires more than once (the Enforcer fires at `enf_atk6` and again at
 `enf_atk10`) would otherwise keep an exact second shot, and its difficulty
 would not scale with `skill`. The error therefore stays pending until the
-monster decides again, and every frame that fires is offset. Shots that aim
+monster decides again, and every frame that fires is offset. A shot that
+runs as another entity's think is bent by its owner's error: the Scrag's
+chain spawns two carriers with `think = Wiz_FastFire`, and
+`Wiz_FastFire`, running as each carrier's think, aims the spike from the
+carrier at the enemy the wizard copied onto it. That think belongs to the
+owner's fire set, and when it runs the enemy's origin is offset around the
+carrier for that one execution; a carrier of a monster that is not
+nominated runs stock (retrain spec part 0C). Shots that aim
 from the monster's own facing rather than from the enemy's origin — the
 Ogre's grenade throws with `makevectors(self.angles)` and only takes its
 lead from the enemy — cannot be bent by displacing the enemy, so the
@@ -301,7 +319,10 @@ think that would have set them. Measured: with the aim error overridden to
 45 degrees the Enforcer's shots all miss (0 damage in 3 s), and with no
 error the same shot hits; the Ogre's throw window hashes differ with and
 without the same override, which is the flight-path difference the sim's
-entity copy cannot show.
+entity copy cannot show. For the Scrag, whose spikes pass 13 units either
+side of a standing player: with the error overridden to 45 degrees its
+attack costs that player 0 health in 4 s, and with no error 18 (two spikes
+of 9).
 
 **A whole level at once (#46, M6).** The hook keeps a fixed table of 64
 nominations, each with its own callback, user pointer, QuakeC names, animation

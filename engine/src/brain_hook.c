@@ -159,12 +159,17 @@ typedef struct dq_hook_slot {
 } dq_hook_slot;
 
 static dq_hook_slot hook_slots[DQ_BRAIN_MAX_MONSTERS];
+/* Slots holding a nomination. The hook's entry point runs for every think
+ * of the stock game too, so its extra work waits on this instead of on a
+ * lookup per think. */
+static int hook_slots_in_use;
 
 /* Resolve a class's QuakeC functions from its prefix: the stand and run
  * frames, the attack entry and the shot. Defined below, next to the
  * lookups it uses. */
 static int resolve_prefix(dq_hook_slot *slot, const char *prefix);
 static void find_enemy_globals(void);
+static float state_frame(func_t fnum);
 
 /* The class prefix of a decision think's name ("enf_stand1" -> "enf_"). */
 static int decision_think_prefix(const char *name, char *out, size_t size);
@@ -549,6 +554,8 @@ void dq_brain_set_stock_identity(uint64_t hash, size_t length)
 
 static void slot_reset(dq_hook_slot *slot)
 {
+    if (slot->entity_index)
+        hook_slots_in_use--;
     memset(slot, 0, sizeof(*slot));
     dq_handicap_reset(&slot->handicap);
 }
@@ -707,7 +714,8 @@ static void find_enemy_globals(void)
     enemy_globals_found = 1;
 }
 
-static int chain_has_shot_call(func_t fnum)
+/* Does this function's body fire a shot: does it call a shot-named one? */
+static int chain_calls_shot(func_t fnum)
 {
     dfunction_t *function = &pr_functions[fnum];
     for (int s = 0; s < 512; s++) {
@@ -720,6 +728,77 @@ static int chain_has_shot_call(func_t fnum)
             if (called > 0 && called < progs->numfunctions &&
                 is_shot_function(PR_GetString(pr_functions[called].s_name)))
                 return 1;
+        }
+    }
+    return 0;
+}
+
+/* The global that holds a field's offset: ".think" compiles to one, which an
+ * OP_ADDRESS reads. -1 when the progs has no such field. */
+static int field_offset_global(const char *name)
+{
+    ddef_t *defs = (ddef_t *)((byte *)progs + progs->ofs_globaldefs);
+    for (int i = 0; i < progs->numglobaldefs; i++)
+        if (defs[i].type == ev_field && strcmp(PR_GetString(defs[i].s_name), name) == 0)
+            return defs[i].ofs;
+    return -1;
+}
+
+/* The shot think a function spawns, 0 when it spawns none: its body stores
+ * a shot-named function as some entity's THINK. The Scrag does this
+ * (wizard.qc): Wiz_StartFast spawns two carriers with think = Wiz_FastFire,
+ * and Wiz_FastFire, running as each carrier's think, aims the spike. A
+ * function stored in another field is not a think: the Vore's ShalMissile
+ * stores ShalMissileTouch as its missile's touch. Called only on functions
+ * that have a body: a builtin's first_statement is negative and it has no
+ * statements to read. */
+static func_t spawned_shot_think(func_t fnum)
+{
+    int think_field = field_offset_global("think");
+    /* An entity field is reached through a pointer: the OP_ADDRESS before
+     * the store names the entity, the field's offset global, and the global
+     * the pointer lands in; the store then writes through that global. */
+    int pointer = -1;
+    dfunction_t *function = &pr_functions[fnum];
+    for (int s = 0; s < 512; s++) {
+        dstatement_t *statement = &pr_statements[function->first_statement + s];
+        if (statement->op == OP_DONE || statement->op == OP_RETURN)
+            break;
+        if (statement->op == OP_ADDRESS) {
+            pointer = statement->b == think_field ? statement->c : -1;
+            continue;
+        }
+        if (statement->op != OP_STOREP_FNC || pointer < 0 || statement->b != pointer)
+            continue;
+        func_t stored;
+        memcpy(&stored, &pr_globals[statement->a], sizeof(stored));
+        if (stored > 0 && stored < progs->numfunctions &&
+            is_shot_function(PR_GetString(pr_functions[stored].s_name)))
+            return stored;
+    }
+    return 0;
+}
+
+/* The spawned shot's think this function's body starts, 0 when it starts
+ * none: a callee that spawns the shot (see spawned_shot_think). The Scrag's
+ * wiz_fast1 calls Wiz_StartFast. That think is where the shot is aimed, so
+ * it is the one the aim error bends. */
+static func_t chain_spawned_shot(func_t fnum)
+{
+    dfunction_t *function = &pr_functions[fnum];
+    for (int s = 0; s < 512; s++) {
+        dstatement_t *statement = &pr_statements[function->first_statement + s];
+        if (statement->op == OP_DONE || statement->op == OP_RETURN)
+            break;
+        if (statement->op < OP_CALL0 || statement->op > OP_CALL8)
+            continue;
+        func_t called;
+        memcpy(&called, &pr_globals[statement->a], sizeof(called));
+        if (called > 0 && called < progs->numfunctions &&
+            pr_functions[called].first_statement > 0) {
+            func_t stored = spawned_shot_think(called);
+            if (stored)
+                return stored;
         }
     }
     return 0;
@@ -742,13 +821,35 @@ static func_t chain_next(func_t fnum)
     return 0;
 }
 
-/* Does this attack chain reach a shot anywhere? Walked with a visited set:
- * the chains end back in the run cycle, which loops. */
-static int chain_reaches_shot(func_t entry)
+/* Walk an attack entry as far as its QuakeC reaches and report what is
+ * there: 1 when a shot is reached, and in `fires` (when given) the thinks
+ * that aim one, for the aim error. Walked with a visited set, because the
+ * chains end back in the run cycle, which loops.
+ *
+ * Two kinds of step. A state frame leads to the next frame of its chain
+ * (OP_STATE), and to nothing else: its callees are the engine's helpers. A
+ * plain function with no state of its own is a dispatcher, and leads to
+ * each QuakeC function it calls: the Scrag's Wiz_Missile is one call to
+ * wiz_fast1, the Ogre's ogre_melee picks a chain by range. A builtin is
+ * never entered; it has no body to read.
+ *
+ * A function reaches a shot when it fires one (it calls a shot-named
+ * function: the think to bend is the function itself) or starts one (it
+ * calls one that spawns the shot: the think to bend is the spawned shot's
+ * own, which runs as the spawned entity's think; part 0C of the retrain
+ * spec). */
+static int walk_attack_chain(func_t entry, func_t *fires, int max, int *fire_count)
 {
-    func_t visited[96];
+    func_t visited[128];
     int visited_count = 0;
-    for (func_t f = entry; f; f = chain_next(f)) {
+    func_t queue[128];
+    int queue_count = 0;
+    int reached = 0;
+
+    if (entry)
+        queue[queue_count++] = entry;
+    while (queue_count > 0) {
+        func_t f = queue[--queue_count];
         int seen = 0;
         for (int i = 0; i < visited_count; i++)
             if (visited[i] == f) {
@@ -756,76 +857,78 @@ static int chain_reaches_shot(func_t entry)
                 break;
             }
         if (seen)
-            return 0;
+            continue;
         if (visited_count < (int)(sizeof(visited) / sizeof(*visited)))
             visited[visited_count++] = f;
-        if (chain_has_shot_call(f))
-            return 1;
-    }
-    return 0;
-}
 
-/* Does this attack entry hit from a distance? Its own state chain reaches a
- * shot, or it is a dispatcher - a plain function that picks among chains,
- * like the Scrag's "Wiz_Missile" or the Ogre's "ogre_melee" - and a chain it
- * can start does. */
-static int entry_is_ranged(func_t entry, int depth)
-{
-    if (!entry)
-        return 0;
-    if (chain_reaches_shot(entry))
-        return 1;
-    dfunction_t *function = &pr_functions[entry];
-    if (function->first_statement <= 0 || depth >= 2)
-        return 0;
-    for (int s = 0; s < 512; s++) {
-        dstatement_t *statement = &pr_statements[function->first_statement + s];
-        if (statement->op == OP_DONE || statement->op == OP_RETURN)
-            break;
-        if (statement->op == OP_STATE)
-            return 0; /* a state function: its chain was walked above */
-        if (statement->op >= OP_CALL0 && statement->op <= OP_CALL8) {
+        func_t aimed[2];
+        int aimed_count = 0;
+        if (chain_calls_shot(f))
+            aimed[aimed_count++] = f;
+        func_t spawned = chain_spawned_shot(f);
+        if (spawned)
+            aimed[aimed_count++] = spawned;
+        for (int a = 0; a < aimed_count; a++) {
+            reached = 1;
+            if (!fires)
+                continue;
+            int duplicate = 0;
+            for (int i = 0; i < *fire_count; i++)
+                if (fires[i] == aimed[a])
+                    duplicate = 1;
+            if (!duplicate && *fire_count < max)
+                fires[(*fire_count)++] = aimed[a];
+        }
+
+        if (state_frame(f) >= 0.0f) {
+            func_t next = chain_next(f);
+            if (next && queue_count < (int)(sizeof(queue) / sizeof(*queue)))
+                queue[queue_count++] = next;
+            continue;
+        }
+        dfunction_t *function = &pr_functions[f];
+        for (int s = 0; s < 512; s++) {
+            dstatement_t *statement = &pr_statements[function->first_statement + s];
+            if (statement->op == OP_DONE || statement->op == OP_RETURN)
+                break;
+            if (statement->op < OP_CALL0 || statement->op > OP_CALL8)
+                continue;
             func_t called;
             memcpy(&called, &pr_globals[statement->a], sizeof(called));
             if (called > 0 && called < progs->numfunctions &&
-                pr_functions[called].first_statement > 0 && entry_is_ranged(called, depth + 1))
-                return 1;
+                pr_functions[called].first_statement > 0 &&
+                queue_count < (int)(sizeof(queue) / sizeof(*queue)))
+                queue[queue_count++] = called;
         }
     }
-    return 0;
+    return reached;
 }
 
-/* The attack chain's own frames that fire the shot: walk the state chain
- * from each attack entry - the spawn's th_melee and th_missile, else the
- * shape probe - and record every frame that calls a shot function. The
- * Enforcer's chain reaches "enforcer_fire" twice (atk6 and atk10) and the
- * Ogre's throw chain calls "OgreFireGrenade" from its "ogre_nail" frames,
- * which no "<prefix>atk<n>" name scan could find (#53). */
+/* Does this attack chain reach a shot anywhere? */
+static int chain_reaches_shot(func_t entry)
+{
+    return walk_attack_chain(entry, NULL, 0, NULL);
+}
+
+/* Does this attack entry hit from a distance: does its chain reach a shot,
+ * a dispatcher's included (see walk_attack_chain)? */
+static int entry_is_ranged(func_t entry)
+{
+    return walk_attack_chain(entry, NULL, 0, NULL);
+}
+
+/* The attack chain's own frames that fire the shot, and the spawned shots'
+ * thinks that aim one (see walk_attack_chain): walk from each attack entry,
+ * the spawn's th_melee and th_missile, else the shape probe. The Enforcer's
+ * chain reaches "enforcer_fire" twice (atk6 and atk10) and the Ogre's throw
+ * chain calls "OgreFireGrenade" from its "ogre_nail" frames, which no
+ * "<prefix>atk<n>" name scan could find (#53). */
 static int find_fire_thinks(const dq_hook_slot *slot, func_t *out, int max)
 {
     const func_t entries[3] = {slot->melee_think, slot->missile_think, slot->attack_think};
-    func_t visited[96];
-    int visited_count = 0;
     int count = 0;
-
-    for (int e = 0; e < 3; e++) {
-        if (!entries[e])
-            continue;
-        for (func_t f = entries[e]; f; f = chain_next(f)) {
-            int seen = 0;
-            for (int i = 0; i < visited_count; i++)
-                if (visited[i] == f) {
-                    seen = 1;
-                    break;
-                }
-            if (seen)
-                break;
-            if (visited_count < (int)(sizeof(visited) / sizeof(*visited)))
-                visited[visited_count++] = f;
-            if (count < max && chain_has_shot_call(f))
-                out[count++] = f;
-        }
-    }
+    for (int e = 0; e < 3; e++)
+        walk_attack_chain(entries[e], out, max, &count);
     return count;
 }
 
@@ -1179,7 +1282,17 @@ static void hook_apply(edict_t *ent, func_t fnum, dq_hook_slot *slot,
     int moved = chase_moved;
     float travel_yaw = new_yaw;
     if (speed > 0.01f) {
-        if ((int)ent->v.flags & FL_ONGROUND) {
+        /* A flying or swimming monster takes the step as well. The step
+         * physics gives a monster's velocity to the world only while it is
+         * airborne and neither flying nor swimming (SV_Physics_Step: the
+         * freefall runs when none of FL_ONGROUND, FL_FLY and FL_SWIM is
+         * set), so a velocity handed to any other monster is never applied
+         * - the driven Scrags stood still on e3m5's pillars. SV_movestep
+         * moves a flyer by a straight traced step with no step-up and no
+         * floor check, so a perched one keeps its perch (measured: 159
+         * units in 2 s, no height change). An airborne walker keeps the
+         * velocity path, where the freefall applies it. */
+        if ((int)ent->v.flags & (FL_ONGROUND | FL_FLY | FL_SWIM)) {
             vec3_t move, before;
             VectorScale(wish, (float)host_frametime, move);
             VectorCopy(ent->v.origin, before);
@@ -1302,6 +1415,36 @@ static dq_hook_slot *slot_for_edict(const edict_t *ent)
     return NULL;
 }
 
+/* The pending aim error bends one execution of a think that aims a shot,
+ * `fnum`, and `shooter` is the entity whose think it is. The aim reads the
+ * enemy's origin, so that origin is offset tangentially, around the
+ * shooter's own origin, for this one execution and restored afterwards. A
+ * shot that aims from the shooter's facing instead - the Ogre's grenade
+ * throws with makevectors(self.angles) and only takes its lead from the
+ * enemy - cannot be bent by displacing the enemy, so the facing is rolled by
+ * the same error too and restored after the frame (#53). */
+static void bend_and_execute(dq_hook_slot *slot, edict_t *shooter, func_t fnum)
+{
+    edict_t *enemy = PROG_TO_EDICT(shooter->v.enemy);
+    vec3_t saved, delta;
+    VectorCopy(enemy->v.origin, saved);
+    VectorSubtract(enemy->v.origin, shooter->v.origin, delta);
+    float distance = sqrtf(delta[0] * delta[0] + delta[1] * delta[1]);
+    if (distance > 1.0f) {
+        float along =
+            distance * tanf(slot->handicap.aim_yaw_deg * 3.14159265f / 180.0f);
+        enemy->v.origin[0] += -delta[1] / distance * along;
+        enemy->v.origin[1] += delta[0] / distance * along;
+        enemy->v.origin[2] +=
+            distance * tanf(slot->handicap.aim_pitch_deg * 3.14159265f / 180.0f);
+    }
+    float saved_yaw = shooter->v.angles[YAW];
+    shooter->v.angles[YAW] += slot->handicap.aim_yaw_deg;
+    PR_ExecuteProgram(fnum);
+    shooter->v.angles[YAW] = saved_yaw;
+    VectorCopy(saved, enemy->v.origin);
+}
+
 void dqsim_hook_execute_program(func_t fnum)
 {
     /* A new level, or the same map reloaded after a death: both clear
@@ -1328,37 +1471,12 @@ void dqsim_hook_execute_program(func_t fnum)
     if (slot) {
         edict_t *ent = EDICT_NUM(slot->entity_index);
         if (!ent->free && pr_global_struct->self == EDICT_TO_PROG(ent)) {
-            /* The pending aim error acts where the shot is actually aimed:
-             * the fire think reads the enemy's origin, so offset that
-             * origin tangentially for this one execution and restore it.
-             * It stays pending for the rest of the attack: a class whose
-             * chain fires more than once (the Enforcer fires twice) would
-             * otherwise keep an exact second shot (#49). */
+            /* The pending aim error acts where the shot is actually aimed
+             * (see bend_and_execute). It stays pending for the rest of the
+             * attack: a class whose chain fires more than once (the Enforcer
+             * fires twice) would otherwise keep an exact second shot (#49). */
             if (slot->handicap.aim_pending && is_fire_think(slot, fnum) && ent->v.enemy) {
-                edict_t *enemy = PROG_TO_EDICT(ent->v.enemy);
-                vec3_t saved, delta;
-                VectorCopy(enemy->v.origin, saved);
-                VectorSubtract(enemy->v.origin, ent->v.origin, delta);
-                float distance = sqrtf(delta[0] * delta[0] + delta[1] * delta[1]);
-                if (distance > 1.0f) {
-                    float along = distance * tanf(slot->handicap.aim_yaw_deg *
-                                                  3.14159265f / 180.0f);
-                    enemy->v.origin[0] += -delta[1] / distance * along;
-                    enemy->v.origin[1] += delta[0] / distance * along;
-                    enemy->v.origin[2] += distance * tanf(slot->handicap.aim_pitch_deg *
-                                                          3.14159265f / 180.0f);
-                }
-                /* Shots that aim from the monster's own facing rather than
-                 * from the enemy's origin - the Ogre's grenade throws with
-                 * makevectors(self.angles) and only takes its lead from the
-                 * enemy - cannot be bent by displacing the enemy, so the
-                 * monster's facing is rolled by the same error too and
-                 * restored after the frame (#53). */
-                float saved_yaw = ent->v.angles[YAW];
-                ent->v.angles[YAW] += slot->handicap.aim_yaw_deg;
-                PR_ExecuteProgram(fnum);
-                ent->v.angles[YAW] = saved_yaw;
-                VectorCopy(saved, enemy->v.origin);
+                bend_and_execute(slot, ent, fnum);
                 return;
             }
             if (ent->v.health > 0 && (func_t)ent->v.think == fnum && ent->v.nextthink == 0 &&
@@ -1395,6 +1513,31 @@ void dqsim_hook_execute_program(func_t fnum)
                     }
                     hook_apply(ent, fnum, slot, &obs, &action);
                 }
+                return;
+            }
+        }
+    }
+    /* A shot that runs as another entity's think (RETRAIN_SPEC part 0C).
+     * The Scrag's Wiz_FastFire is the spawned carrier's think, and the
+     * carrier's owner is the nominated wizard. The owner's pending aim error
+     * bends it the same way, around the carrier: Wiz_FastFire aims from the
+     * carrier's own origin at the enemy the wizard copied onto it
+     * (wizard.qc). The think must be in the owner's fire set, so a carrier
+     * of a monster that is not nominated runs stock.
+     *
+     * Only while something is nominated, and refused on the cheap facts
+     * first: this runs for every think of the stock game as well, and a
+     * field lookup per think there cost 4% of the simulator's throughput
+     * (measured, interleaved runs with and without it). */
+    if (!slot && hook_slots_in_use && progs_is_stock && fnum > 0 && pr_global_struct->self) {
+        edict_t *self_ent = PROG_TO_EDICT(pr_global_struct->self);
+        if (self_ent && !self_ent->free && self_ent->v.enemy) {
+            eval_t *owner = GetEdictFieldValue(self_ent, "owner");
+            dq_hook_slot *owner_slot =
+                owner && owner->edict ? slot_for_edict(PROG_TO_EDICT(owner->edict)) : NULL;
+            if (owner_slot && owner_slot->handicap.aim_pending &&
+                is_fire_think(owner_slot, fnum)) {
+                bend_and_execute(owner_slot, self_ent, fnum);
                 return;
             }
         }
@@ -1528,6 +1671,7 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
 
     slot_reset(slot);
     slot->entity_index = entity_index;
+    hook_slots_in_use++;
     slot->callback = callback;
     slot->user = user;
     slot->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
@@ -1559,12 +1703,12 @@ const char *dq_brain_hook_nominate(int entity_index, dqsim_hook_callback callbac
     slot->missile_think = missile && chain_reaches_shot(missile) ? missile : probe;
     if (!melee && !missile)
         slot->melee_think = probe; /* no spawn entries: the probe's guess everywhere */
-    slot->melee_ranged = entry_is_ranged(slot->melee_think, 0);
-    slot->missile_ranged = entry_is_ranged(slot->missile_think, 0);
+    slot->melee_ranged = entry_is_ranged(slot->melee_think);
+    slot->missile_ranged = entry_is_ranged(slot->missile_think);
     /* A leap is a state chain of the class's own; a dispatcher the ranged
      * rule could not follow (the Scrag's) is not one. */
     slot->leap_think =
-        missile && state_frame(missile) >= 0.0f && !entry_is_ranged(missile, 0) ? missile : 0;
+        missile && state_frame(missile) >= 0.0f && !entry_is_ranged(missile) ? missile : 0;
     slot->fire_count = find_fire_thinks(slot, slot->fire_thinks, DQ_MAX_FIRE_THINKS);
     return NULL;
 }
