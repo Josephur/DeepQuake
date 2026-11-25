@@ -91,9 +91,10 @@ measured 78-87 microseconds per decision at the hook's 72 Hz tick), and
 maps greedy per-head actions to the same discrete decisions training used.
 A verification build (`-DDQSIM_CLIENT_SELFTEST="model,report"`) replays
 synthetic hook reports through the client's own observation builder and
-model and writes them for comparison against the Python policy — measured
-deviations: observation 3.6e-7, probabilities 6.0e-8, identical greedy
-actions. Without a model the client is stock Quake.
+model and writes them for comparison against the Python builder. Measured
+for the 142-wide layout (retrain spec part 0D): the observations agree to
+4e-7, and the greedy actions are identical. Without a model the client is
+stock Quake.
 
 **Fidelity is measured, not assumed.** `engine/tests/test_fidelity.c` (ctest
 name `dqsim.fidelity`) starts a second, unmodified QuakeSpasm built from the
@@ -359,8 +360,11 @@ When the noise is forgotten the alert ends and the pace returns to walk.
 Hearing is a setting of the glue, never a model input: `dqsim_set_hearing`
 turns it, the range and the run chance, and the defaults come from the
 monster's own skill (easy 500 units/0.25, normal and hard 1000/0.5,
-nightmare 1500/0.75), every entry overridable by the caller. The
-observation's hearing fields say where the noise was and how long ago; which
+nightmare 1500/0.75), every entry overridable by the caller. In the play
+client they are cvars, pushed to the hook every tick: `dq_hearing`
+(default 1), `dq_hear_range` (0: the skill table's), `dq_hear_run` (-1:
+the skill table's) and `dq_hear_player` (0).
+The observation's hearing fields say where the noise was and how long ago; which
 kind it was is for tests and logs only.
 
 ### 3. Observations and actions
@@ -381,16 +385,28 @@ Chosen to be cheap to compute in the simulator and identical in the client:
 - **Skill conditioning**: one more input, Quake's own `skill` setting
   (0 easy, 1 normal, 2 hard, 3 nightmare). See "Difficulty" below.
 
-**Implemented for the monster (#33)** (`python/deepquake/monster.py`,
-whose docstring holds the exact layout): the brain hook's ray fan and
-surface kinds and the monster's own velocity, ground and water state,
-health and QuakeC attack cooldown come first; then the enemy's bearing,
-height and distance and its health — only while the hook sees it — and a
-last-seen memory (bearing, height, distance, age) that fades after five
-seconds; finally `skill / 3` and the style vector (aggression, caution,
-stealth). Nothing in the vector is absolute, per-map, or visible through
-walls: a test places the player behind a wall on an id map and on the
-generated map and asserts the enemy channels read "not visible".
+**Implemented for the monster (#33, in the layout retrain spec part 0D
+settled)** (`python/deepquake/monster.py`, whose docstring holds the exact
+table; `dq_build_observation` in `engine/src/brain_onnx.c` builds the
+same 142 floats): the brain hook's ray fan and surface kinds and the
+monster's own velocity, ground and water state come first; then its
+health as a fraction of its health when nominated and the QuakeC attack
+cooldown; then the enemy's bearing, height and distance and its health —
+only while the hook sees it — and a last-seen memory (bearing, height,
+distance, age) that fades after five seconds; then `skill / 3` and the
+style vector (aggression, caution, stealth), which the client feeds from
+its `dq_style` cvar and training keeps at the default, `0.5 0.5 0.5`.
+Then what hearing and company add: the last heard noise (bearing,
+height, distance, age, and whether there is one — never what kind it
+was, and never a last-seen place), the pace the hook moves the monster
+at (walk, investigate or run, one-hot), the bearing and distance of the
+nearest visible live monster other than itself, and how many are
+visible. Last comes the monster type, one-hot over ten types. Nothing in
+the vector is absolute, per-map, or visible through walls: a test places
+the player behind a wall on an id map and on the generated map and
+asserts the enemy channels read "not visible". The layout changed once,
+for the retraining, so a checkpoint from the 128-wide layout does not
+fit it.
 
 #### Map independence
 
@@ -511,14 +527,14 @@ reverse is not.
 
 **Implemented (#48, #50, #53, #55, #56, #57, #58, #59)** for the Grunt, the
 Dog, the Enforcer, the Ogre, the Hell Knight, the Shalrath, the Knight, the
-Fiend and the Shambler, with
+Fiend and the Shambler, and for the Scrag (retrain spec part 0D), with
 three simplifications of the design above:
 
 - **The type is a one-hot, appended to the observation**
   (`deepquake.monster.MONSTER_TYPES = (monster_army, monster_dog,
   monster_enforcer, monster_ogre, monster_hell_knight, monster_shalrath,
-  monster_knight, monster_demon1, monster_shambler)`, so `MONSTER_OBS_DIM`
-  is 119 + 9 = 128). The recurrent
+  monster_knight, monster_demon1, monster_shambler, monster_wizard)`, so
+  `MONSTER_OBS_DIM` is 132 + 10 = 142). The recurrent
   cell's input weights play the role of the embedding, and the model keeps a
   single observation input, which is what the client passes.
 - **A policy head per type, one shared value head.** The types have
@@ -540,8 +556,10 @@ unit test checks actions, log-probabilities, value and hidden state are
 identical for the carried-over one-hots). Training then samples the body per
 episode, so all the types train together. The exported model ships a class
 map, `<model>.onnx.monsters` (`classname type_index` per line), which tells
-the client which classes it drives; a 119-wide v1 model without one still
-loads as the Grunt policy.
+the client which classes it drives; a model without one drives the Grunt
+alone. The client loads widths 133 to 142 only: the layout plus one to
+ten type entries. A model from the 128-wide layout is refused with a log
+line.
 
 ### 5. Training — `python/deepquake/`
 

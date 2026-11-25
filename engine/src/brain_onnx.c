@@ -16,14 +16,14 @@
  * has up to 35 Grunts, and one shared hidden state would smear their
  * episodes together. The number is capped by dq_max_monsters (0 = all).
  *
- * A model is either a v1 single-type one (119 observation floats, the
- * Grunt only) or a shared one (#48) whose input ends with a one-hot of
- * the monster type; "<path>.monsters" names the classes and their type
+ * A model is a shared one (#48) whose input ends with a one-hot of the
+ * monster type; "<path>.monsters" names the classes and their type
  * index, and each nominated monster carries its own index into the
  * observation, so one session drives a mixed level.
  *
- * The observation the model consumes is deepquake.monster's (#33): the
- * dq_build_observation function below constructs exactly that layout.
+ * The observation the model consumes is deepquake.monster's (#33), in the
+ * layout the retrain spec's part 0D settled: the dq_build_observation
+ * function below constructs it, exactly as the Python MonsterObserver does.
  *
  * Without a model (no dq_model cvar, or a load failure) the client plays
  * the stock game (#44's fallback): the hook is simply never nominated.
@@ -42,11 +42,11 @@
 #include <onnxruntime_c_api.h>
 
 /* deepquake.monster.MONSTER_OBS_BASE_DIM, MEMORY_SECONDS and the type
- * vocabulary width (#48; nine types since #59). A v1 model (models-v1) is
- * 119 wide and has no type input; a shared model appends one one-hot entry
- * per type. */
-#define DQ_MONSTER_OBS_BASE_DIM 119
-#define DQ_MONSTER_MAX_TYPES 9
+ * vocabulary width (#48; ten types since the retrain spec's part 0D added
+ * the Scrag). A model's observation is the base layout followed by one
+ * one-hot entry per type it knows. */
+#define DQ_MONSTER_OBS_BASE_DIM 132
+#define DQ_MONSTER_MAX_TYPES 10
 #define DQ_MONSTER_OBS_MAX (DQ_MONSTER_OBS_BASE_DIM + DQ_MONSTER_MAX_TYPES)
 #define DQ_MONSTER_MEMORY_SECONDS 5.0f
 /* deepquake.monster_env.MONSTER_SPEED: commanded forward/side speed the
@@ -61,7 +61,7 @@
 /* dq_model is a space-separated list; one session per model, and each
  * model names the monster classes it drives in "<path>.monsters". */
 #define DQ_MAX_MODELS 4
-#define DQ_MAX_CLASSES 9
+#define DQ_MAX_CLASSES 10
 #define DQ_MAX_PATH 512
 
 typedef struct dq_model_class {
@@ -76,8 +76,8 @@ typedef struct dq_model {
     char *name_out_probs, *name_out_value, *name_out_hidden;
     size_t hidden_dim;
     int obs_dim;
-    /* How many monster-type entries the observation ends with (#48): 0 for
-     * a v1 model, n_types for a shared one. */
+    /* How many monster-type entries the observation ends with (#48): one per
+     * type the model knows, 1 to DQ_MONSTER_MAX_TYPES. */
     int type_dim;
     /* The action layout (deepquake.monster_env.ACTION_NVEC) and the turn
      * grid (combat.TURN_DEGREES), from the ".nvec" sidecar; the Grunt's
@@ -100,6 +100,9 @@ typedef struct dq_monster_state {
     double last_seen_time;
     int last_seen_valid;
     int skill;
+    /* The style the policy is asked to play in (aggression, caution,
+     * stealth), from dq_style at nomination; training uses its default. */
+    float style[3];
     /* Which entry of the model's type one-hot this monster is (#48). */
     int type_index;
     /* Decision cadence (#61): the action is held for DQ_FRAME_SKIP ticks like
@@ -140,7 +143,14 @@ static cvar_t dq_style_var = {"dq_style", "0.5 0.5 0.5", CVAR_ARCHIVE};
 static cvar_t dq_seed_var = {"dq_seed", "7", CVAR_ARCHIVE};
 static cvar_t dq_cpu_var = {"dq_onnx_cpu", "0", CVAR_ARCHIVE};
 static cvar_t dq_max_var = {"dq_max_monsters", "0", CVAR_ARCHIVE};
+/* The hearing settings of retrain spec part 0B, as cvars. A range of 0 and
+ * a run chance below 0 mean the skill table's. */
+static cvar_t dq_hearing_var = {"dq_hearing", "1", CVAR_ARCHIVE};
+static cvar_t dq_hear_range_var = {"dq_hear_range", "0", CVAR_ARCHIVE};
+static cvar_t dq_hear_run_var = {"dq_hear_run", "-1", CVAR_ARCHIVE};
+static cvar_t dq_hear_player_var = {"dq_hear_player", "0", CVAR_ARCHIVE};
 static cvar_t *cvar_model, *cvar_style, *cvar_seed, *cvar_cpu, *cvar_max;
+static cvar_t *cvar_hearing, *cvar_hear_range, *cvar_hear_run, *cvar_hear_player;
 
 static OrtEnv *ort_env;
 static OrtMemoryInfo *ort_memory;
@@ -193,8 +203,8 @@ static void read_layout(dq_model *model)
 }
 
 /* Read "<model>.monsters" (written by deepquake.export_onnx): one
- * "<classname> <type index>" per line. Without it the model is the Grunt
- * policy, which is what models-v1 shipped. */
+ * "<classname> <type index>" per line. Without it the model drives the
+ * Grunt alone, as the first released models did. */
 static void read_classes(dq_model *model)
 {
     char list[DQ_MAX_PATH + 16];
@@ -275,32 +285,28 @@ static int load_model(dq_model *model)
     /* The client drives monster policies only (#35): a model with another
      * observation width is the wrong architecture - refuse it for stock
      * play with a clear log line instead of feeding it misaligned input.
-     * Two widths are legal: 119 (a v1 single-type model) and
-     * 119 + n_types (a shared model, #48). */
-    if (model->obs_dim == DQ_MONSTER_OBS_BASE_DIM) {
-        model->type_dim = 0;
-    } else if (model->obs_dim > DQ_MONSTER_OBS_BASE_DIM &&
-               model->obs_dim <= DQ_MONSTER_OBS_MAX) {
+     * The width is the base layout plus one one-hot entry per type the
+     * model knows, 1 to DQ_MONSTER_MAX_TYPES of them (#48). The 119-wide
+     * single-type models and the 128-wide nine-type ones predate the
+     * retrain spec's part 0D and no longer fit. */
+    if (model->obs_dim > DQ_MONSTER_OBS_BASE_DIM && model->obs_dim <= DQ_MONSTER_OBS_MAX) {
         model->type_dim = model->obs_dim - DQ_MONSTER_OBS_BASE_DIM;
     } else {
         Con_Printf("deepquake: refusing %s - observation width %d, the client "
-                   "expects %d (a single-type model) or %d-%d (a shared model)\n",
-                   model->path, model->obs_dim, DQ_MONSTER_OBS_BASE_DIM,
-                   DQ_MONSTER_OBS_BASE_DIM + 1, DQ_MONSTER_OBS_MAX);
+                   "expects %d-%d (the layout plus one entry per monster type)\n",
+                   model->path, model->obs_dim, DQ_MONSTER_OBS_BASE_DIM + 1, DQ_MONSTER_OBS_MAX);
         return -1;
     }
     return 0;
 }
 
-/* A model only drives classes its observation can name: a v1 model (no
- * type input) covers the single type 0, a shared model every index it has
- * an entry for (#48). */
+/* A model only drives classes its observation can name: every class needs a
+ * type entry the model has (#48). */
 static int classes_fit(dq_model *model)
 {
     for (int c = 0; c < model->class_count; c++) {
         int index = model->classes[c].type_index;
-        int ok = model->type_dim == 0 ? index == 0
-                                      : index >= 0 && index < model->type_dim;
+        int ok = index >= 0 && index < model->type_dim;
         if (!ok) {
             Con_Printf("deepquake: refusing %s - class %s has type index %d "
                        "but the model has %d type input(s)\n",
@@ -358,7 +364,7 @@ static void load_models(const char *list)
 }
 
 /* The model driving a class, and which type entry of its observation that
- * class is (unused by a v1 model). */
+ * class is. */
 static dq_model *model_for_class(const char *classname, int *type_index)
 {
     for (int m = 0; m < model_count; m++)
@@ -370,8 +376,31 @@ static dq_model *model_for_class(const char *classname, int *type_index)
     return NULL;
 }
 
-/* The observation deepquake.monster builds (#33), from a live hook report
- * and this monster's memory. Kept in C so the client needs no Python. */
+/* Four channels for a point relative to the monster - a seen enemy, the
+ * place it was last seen, a heard noise: the unit vector to it in the
+ * monster's frame (forward, left), its height difference / 256 clipped to
+ * [-1, 1], and its flat distance / 1024 clipped to 2. */
+static void dq_target_channels(float *out, const float *relative, float cos_yaw, float sin_yaw)
+{
+    float dx = relative[0], dy = relative[1];
+    float distance = sqrtf(dx * dx + dy * dy);
+    float scale = 1.0f / (distance > 1e-6f ? distance : 1e-6f);
+    out[0] = (dx * cos_yaw + dy * sin_yaw) * scale;
+    out[1] = (-dx * sin_yaw + dy * cos_yaw) * scale;
+    out[2] = relative[2] / 256.0f;
+    if (out[2] < -1.0f)
+        out[2] = -1.0f;
+    if (out[2] > 1.0f)
+        out[2] = 1.0f;
+    out[3] = distance / 1024.0f;
+    if (out[3] > 2.0f)
+        out[3] = 2.0f;
+}
+
+/* The observation deepquake.monster builds (#33), in the layout the retrain
+ * spec's part 0D settled, from a live hook report and this monster's memory.
+ * Kept in C so the client needs no Python; python/deepquake/monster.py's
+ * docstring holds the table, and the two builders must agree. */
 static void dq_build_observation(dq_monster_state *state,
                                  const dqsim_hook_observation *hook, float *out)
 {
@@ -389,8 +418,11 @@ static void dq_build_observation(dq_monster_state *state,
     out[at + 1] = (-hook->velocity[0] * sin_yaw + hook->velocity[1] * cos_yaw) / 400.0f;
     out[at + 2] = hook->velocity[2] / 400.0f;
     out[at + 3] = hook->on_ground ? 1.0f : 0.0f;
-    out[at + 4] = hook->health < 0.0f ? 0.0f
-                  : (hook->health > 100.0f ? 1.0f : hook->health / 100.0f);
+    /* Health as a fraction of the monster's own health when nominated. A
+     * report without a start health divides by 100, as the Python one does. */
+    float start = hook->start_health > 0.0f ? hook->start_health : 100.0f;
+    float health = hook->health < 0.0f ? 0.0f : hook->health / start;
+    out[at + 4] = health > 1.0f ? 1.0f : health;
     out[at + 5] = hook->attack_cooldown < 0.0f ? 0.0f
                   : (hook->attack_cooldown > 1.0f ? 1.0f : hook->attack_cooldown);
     out[at + 6] = hook->waterlevel / 3.0f;
@@ -407,17 +439,7 @@ static void dq_build_observation(dq_monster_state *state,
             state->last_seen[k] = hook->origin[k] + enemy->relative[k];
         state->last_seen_time = hook->time;
         state->last_seen_valid = 1;
-        float dx = enemy->relative[0], dy = enemy->relative[1];
-        float distance = sqrtf(dx * dx + dy * dy);
-        float scale = 1.0f / (distance > 1e-6f ? distance : 1e-6f);
-        out[at + 7] = (dx * cos_yaw + dy * sin_yaw) * scale;
-        out[at + 8] = (-dx * sin_yaw + dy * cos_yaw) * scale;
-        float dz = enemy->relative[2];
-        out[at + 9] = dz / 256.0f;
-        if (out[at + 9] < -1.0f) out[at + 9] = -1.0f;
-        if (out[at + 9] > 1.0f) out[at + 9] = 1.0f;
-        out[at + 10] = distance / 1024.0f;
-        if (out[at + 10] > 2.0f) out[at + 10] = 2.0f;
+        dq_target_channels(out + at + 7, enemy->relative, cos_yaw, sin_yaw);
         out[at + 11] = 1.0f;
         out[at + 12] = enemy->health < 0.0f ? 0.0f
                        : (enemy->health > 100.0f ? 1.0f : enemy->health / 100.0f);
@@ -429,34 +451,58 @@ static void dq_build_observation(dq_monster_state *state,
         if (age > DQ_MONSTER_MEMORY_SECONDS) {
             state->last_seen_valid = 0;
         } else {
-            float rx = state->last_seen[0] - hook->origin[0];
-            float ry = state->last_seen[1] - hook->origin[1];
-            float rz = state->last_seen[2] - hook->origin[2];
-            float distance = sqrtf(rx * rx + ry * ry);
-            float scale = 1.0f / (distance > 1e-6f ? distance : 1e-6f);
-            out[at + 13] = (rx * cos_yaw + ry * sin_yaw) * scale;
-            out[at + 14] = (-rx * sin_yaw + ry * cos_yaw) * scale;
-            out[at + 15] = rz / 256.0f;
-            if (out[at + 15] < -1.0f) out[at + 15] = -1.0f;
-            if (out[at + 15] > 1.0f) out[at + 15] = 1.0f;
-            out[at + 16] = distance / 1024.0f;
-            if (out[at + 16] > 2.0f) out[at + 16] = 2.0f;
+            float relative[3];
+            for (int k = 0; k < 3; k++)
+                relative[k] = state->last_seen[k] - hook->origin[k];
+            dq_target_channels(out + at + 13, relative, cos_yaw, sin_yaw);
             out[at + 17] = age / DQ_MONSTER_MEMORY_SECONDS;
             out[at + 18] = 1.0f;
         }
     }
 
     out[at + 19] = state->skill / 3.0f;
-    /* The fixed style the cross-check test uses (0.25, 0.5, 0.75); exposing
-     * dq_style to the policy is the M6 cvar item. */
-    out[at + 20] = 0.25f;
-    out[at + 21] = 0.5f;
-    out[at + 22] = 0.75f;
-    /* The body the policy is wearing (#48): a shared model ends its input
-     * with one one-hot entry per type, and its head is chosen from it. A
-     * v1 model (type_dim 0) has no such slice. */
-    if (state->model->type_dim > 0)
-        out[at + 23 + state->type_index] = 1.0f;
+    for (int k = 0; k < 3; k++)
+        out[at + 20 + k] = state->style[k];
+
+    /* The last heard noise has channels of its own and never becomes the
+     * last-seen place; what kind it was is not an input (part 0D). */
+    if (hook->heard) {
+        dq_target_channels(out + at + 23, hook->heard_relative, cos_yaw, sin_yaw);
+        float age = hook->heard_age < 0.0f ? 0.0f : hook->heard_age / DQSIM_HOOK_HEARD_SECONDS;
+        out[at + 27] = age > 1.0f ? 1.0f : age;
+        out[at + 28] = 1.0f;
+    }
+    /* The pace the hook moves the monster at, one-hot: walk, investigate,
+     * run. One outside the three lights nothing. */
+    if (hook->pace >= DQSIM_PACE_WALK && hook->pace <= DQSIM_PACE_RUN)
+        out[at + 29 + hook->pace] = 1.0f;
+
+    /* The nearest visible live monster other than itself (the first such in
+     * the hook's nearest-first list), and how many there are. */
+    const dqsim_hook_visible *ally = NULL;
+    int allies = 0;
+    for (int i = 0; i < hook->visible_count; i++) {
+        const dqsim_hook_visible *v = &hook->visible[i];
+        if (!(v->flags & FL_MONSTER) || v->health <= 0.0f || v->index == hook->entity_index)
+            continue;
+        if (!ally)
+            ally = v;
+        allies++;
+    }
+    if (ally) {
+        float bearing[4];
+        dq_target_channels(bearing, ally->relative, cos_yaw, sin_yaw);
+        /* Its bearing and distance; its height is not an input. */
+        out[at + 32] = bearing[0];
+        out[at + 33] = bearing[1];
+        out[at + 34] = bearing[3];
+    }
+    float crowd = allies / 4.0f;
+    out[at + 35] = crowd > 1.0f ? 1.0f : crowd;
+
+    /* The body the policy is wearing (#48): the observation ends with one
+     * one-hot entry per type, and the head is chosen from it. */
+    out[at + 36 + state->type_index] = 1.0f;
 }
 
 /* The client's policy: the brain-hook callback running this monster's
@@ -547,6 +593,28 @@ static void onnx_policy(const dqsim_hook_observation *hook, dqsim_hook_action *a
 static void register_cvars(void);
 static void dq_selftest_run(const char *model, const char *report);
 
+/* The style a nominated monster plays with, from dq_style: three numbers
+ * (aggression, caution, stealth), each clipped to [0, 1]. One the cvar does
+ * not give, or does not give as a number, stays at 0.5, the value training
+ * uses. */
+static void parse_style(const char *text, float style[3])
+{
+    const char *cursor = text;
+    for (int k = 0; k < 3; k++) {
+        style[k] = 0.5f;
+        const char *before = cursor;
+        float value = parse_float(&cursor);
+        if (cursor == before)
+            return;
+        if (value >= 0.0f && value <= 1.0f)
+            style[k] = value;
+        else if (value < 0.0f)
+            style[k] = 0.0f;
+        else if (value > 1.0f)
+            style[k] = 1.0f;
+    }
+}
+
 static dq_monster_state *free_state(void)
 {
     for (int i = 0; i < DQ_BRAIN_MAX_MONSTERS; i++)
@@ -625,6 +693,7 @@ static void nominate_pass(void)
         state->model = model;
         state->type_index = type_index;
         state->skill = current_skill < 0 ? 0 : current_skill > 3 ? 3 : current_skill;
+        parse_style(cvar_style->string, state->style);
         /* The recurrent state starts at zero for every episode, like training.
          * No facing is carried: every turn is measured from the facing the
          * hook reports (RETRAIN_SPEC part 0A, #68). */
@@ -690,6 +759,17 @@ static void client_tick(void)
     if (sv.time == last_pass)
         return;
     last_pass = sv.time;
+    /* The hearing settings, every tick: what a cvar leaves at its default
+     * (a range of 0, a run chance below 0) is the skill table's. */
+    dqsim_hearing hearing = {
+        cvar_hearing->value != 0.0f,
+        cvar_hear_range->value > 0.0f ? cvar_hear_range->value : 0.0f,
+        cvar_hear_run->value < 0.0f   ? -1.0f
+        : cvar_hear_run->value > 1.0f ? 1.0f
+                                      : cvar_hear_run->value,
+        cvar_hear_player->value != 0.0f,
+    };
+    dq_brain_set_hearing(&hearing);
     nominate_pass();
     static int seconds;
     if (inference_count && (int)sv.time != seconds) {
@@ -735,7 +815,9 @@ static void dq_selftest_make_hook(double time, int visible, dqsim_hook_observati
     hook->velocity[0] = 100.0f;
     hook->angles[1] = 90.0f;
     hook->health = 80.0f;
+    hook->start_health = 100.0f;
     hook->on_ground = true;
+    hook->pace = DQSIM_PACE_WALK;
     for (int i = 0; i < DQSIM_HOOK_RAY_PITCHES * DQSIM_HOOK_RAY_YAWS; i++) {
         hook->rays[i] = (float)(i % 7) * 0.1f + 0.05f;
         hook->ray_kinds[i] = (unsigned char)(i % 7);
@@ -750,6 +832,27 @@ static void dq_selftest_make_hook(double time, int visible, dqsim_hook_observati
         hook->visible[0].health = 60.0f;
         hook->visible[0].distance = 100.0f;
         hook->visible_count = 1;
+    }
+    if (time == 0.5) {
+        /* The second case also sees a live monster besides the player, hears
+         * a noise, and is investigating: the part 0D channels. */
+        hook->visible[1].index = 7;
+        hook->visible[1].flags = FL_MONSTER;
+        hook->visible[1].relative[0] = -60.0f;
+        hook->visible[1].relative[1] = 90.0f;
+        hook->visible[1].relative[2] = -12.0f;
+        hook->visible[1].health = 30.0f;
+        hook->visible[1].distance = 110.0f;
+        hook->visible_count = 2;
+        hook->heard = 1;
+        hook->heard_kind = DQSIM_NOISE_EXPLOSION;
+        hook->heard_relative[0] = -300.0f;
+        hook->heard_relative[1] = 200.0f;
+        hook->heard_relative[2] = 48.0f;
+        hook->heard_age = 2.5f;
+        hook->pace = DQSIM_PACE_INVESTIGATE;
+    } else if (time > 0.5) {
+        hook->pace = DQSIM_PACE_RUN;
     }
 }
 
@@ -774,6 +877,11 @@ static void dq_selftest_run(const char *model_path, const char *report)
     memset(&state, 0, sizeof(state));
     state.model = &models[0];
     state.skill = 2;
+    /* The style the Python side of the cross-check uses; dq_style is not
+     * read here. */
+    state.style[0] = 0.25f;
+    state.style[1] = 0.5f;
+    state.style[2] = 0.75f;
 
     FILE *out = fopen(report, "w");
     if (!out) {
@@ -786,10 +894,9 @@ static void dq_selftest_run(const char *model_path, const char *report)
     int inferences = 0;
     for (int case_index = 0; case_index < 3; case_index++) {
         dqsim_hook_observation hook;
-        /* A shared model sees one body per case (Grunt, Dog, Grunt), so the
-         * report covers the type one-hot both ways (#48). */
-        if (state.model->type_dim > 0)
-            state.type_index = case_index % state.model->type_dim;
+        /* A shared model sees one body per case (Grunt, Dog, Enforcer), so
+         * the report covers the type one-hot (#48). */
+        state.type_index = case_index % state.model->type_dim;
         dq_selftest_make_hook(case_index == 0 ? 0.0 : (case_index == 1 ? 0.5 : 6.0),
                               case_index < 2, &hook);
         float obs[DQ_MONSTER_OBS_MAX];
@@ -881,6 +988,10 @@ static void register_cvars(void)
     cvar_seed = adopt_cvar(&dq_seed_var, "dq_seed");
     cvar_cpu = adopt_cvar(&dq_cpu_var, "dq_onnx_cpu");
     cvar_max = adopt_cvar(&dq_max_var, "dq_max_monsters");
+    cvar_hearing = adopt_cvar(&dq_hearing_var, "dq_hearing");
+    cvar_hear_range = adopt_cvar(&dq_hear_range_var, "dq_hear_range");
+    cvar_hear_run = adopt_cvar(&dq_hear_run_var, "dq_hear_run");
+    cvar_hear_player = adopt_cvar(&dq_hear_player_var, "dq_hear_player");
     struct {
         const char *name;
         cvar_t *var;
@@ -890,6 +1001,10 @@ static void register_cvars(void)
         {"dq_seed", cvar_seed},
         {"dq_onnx_cpu", cvar_cpu},
         {"dq_max_monsters", cvar_max},
+        {"dq_hearing", cvar_hearing},
+        {"dq_hear_range", cvar_hear_range},
+        {"dq_hear_run", cvar_hear_run},
+        {"dq_hear_player", cvar_hear_player},
     };
     for (int i = 1; i < host_parms->argc - 2; i++) {
         if (strcmp(host_parms->argv[i], "+set") != 0)

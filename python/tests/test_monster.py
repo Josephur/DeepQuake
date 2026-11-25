@@ -1,5 +1,8 @@
 """The monster observation (#33): fair senses, skill and style inputs."""
 
+import dataclasses
+import math
+
 import numpy as np
 import pytest
 from test_sim import require_gamedata, run_in_subprocess
@@ -9,7 +12,7 @@ from deepquake import monster, sim
 BASE = 2 * monster.N_RAYS
 
 
-def _hook(time=0.0, origin=(0.0, 0.0, 0.0), visible=(), health=80.0):
+def _hook(time=0.0, origin=(0.0, 0.0, 0.0), visible=(), health=80.0, start_health=100.0):
     return sim.HookObservation(
         time=time,
         entity_index=12,
@@ -23,6 +26,18 @@ def _hook(time=0.0, origin=(0.0, 0.0, 0.0), visible=(), health=80.0):
         ray_kinds=np.zeros((2, 24), dtype=np.uint8),
         visible=tuple(visible),
         attack_cooldown=0.0,
+        start_health=start_health,
+    )
+
+
+def _monster(relative=(150.0, 0.0, 0.0), health=30.0, index=20):
+    return sim.HookVisible(
+        index=index,
+        flags=sim.FL_MONSTER,
+        relative=relative,
+        velocity=(0.0, 0.0, 0.0),
+        health=health,
+        distance=float(np.hypot(relative[0], relative[1])),
     )
 
 
@@ -40,10 +55,15 @@ def _client(relative=(100.0, 0.0, 0.0), health=100.0):
 def test_layout_and_conditioning_inputs():
     observer = monster.MonsterObserver(skill=3, style=(0.0, 0.5, 1.0))
     obs = observer.observe(_hook())
-    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (128,)
+    assert obs.shape == (monster.MONSTER_OBS_DIM,) == (142,)
+    assert monster.MONSTER_OBS_BASE_DIM == 132
     assert obs[BASE + 19] == 1.0  # skill 3 / 3
     assert list(obs[BASE + 20 : BASE + 23]) == [0.0, 0.5, 1.0]
     assert obs[BASE + 4] == pytest.approx(0.8)  # own health
+    # A report with nothing heard, no ally in sight and the walk pace: of the
+    # channels after the style, only the walk pace is lit (RETRAIN_SPEC 0D).
+    assert list(obs[119:125]) == [0.0] * 6
+    assert list(obs[125:132]) == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     with pytest.raises(ValueError, match="skill"):
         monster.MonsterObserver(skill=4)
     with pytest.raises(ValueError, match="style"):
@@ -62,6 +82,7 @@ def test_monster_type_is_a_one_hot_at_the_end():
         "monster_knight",
         "monster_demon1",
         "monster_shambler",
+        "monster_wizard",
     )
     army = monster.MonsterObserver(monster_type="monster_army").observe(_hook())
     dog = monster.MonsterObserver(monster_type="monster_dog").observe(_hook())
@@ -72,19 +93,21 @@ def test_monster_type_is_a_one_hot_at_the_end():
     knight = monster.MonsterObserver(monster_type="monster_knight").observe(_hook())
     fiend = monster.MonsterObserver(monster_type="monster_demon1").observe(_hook())
     shambler = monster.MonsterObserver(monster_type="monster_shambler").observe(_hook())
+    scrag = monster.MonsterObserver(monster_type="monster_wizard").observe(_hook())
     type_slice = slice(monster.MONSTER_OBS_BASE_DIM, monster.MONSTER_OBS_DIM)
-    assert list(army[type_slice]) == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(dog[type_slice]) == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(enforcer[type_slice]) == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(ogre[type_slice]) == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(hell_knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-    assert list(shalrath[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-    assert list(knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-    assert list(fiend[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    assert list(shambler[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    assert list(army[type_slice]) == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(dog[type_slice]) == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(enforcer[type_slice]) == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(ogre[type_slice]) == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(hell_knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(shalrath[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(knight[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert list(fiend[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    assert list(shambler[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert list(scrag[type_slice]) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     # Nothing else depends on the type: the rest of the vector is identical.
     base = monster.MONSTER_OBS_BASE_DIM
-    for other in (dog, enforcer, ogre, hell_knight, shalrath, knight, fiend, shambler):
+    for other in (dog, enforcer, ogre, hell_knight, shalrath, knight, fiend, shambler, scrag):
         np.testing.assert_array_equal(army[:base], other[:base])
     with pytest.raises(ValueError, match="monster type"):
         monster.MonsterObserver(monster_type="monster_zombie")
@@ -109,6 +132,116 @@ def test_visible_enemy_and_memory():
     # After the memory fades, nothing about the enemy remains.
     obs = observer.observe(_hook(time=10.0, origin=(10.0, 0.0, 0.0)))
     assert obs[BASE + 18] == 0.0 and obs[BASE + 13] == 0.0
+
+
+def test_heard_noise_channels():
+    """The last heard noise has channels of its own (RETRAIN_SPEC part 0D):
+    a noise 300 units ahead and 100 to the left, 32 above the monster, heard
+    2.5 s ago."""
+    hook = dataclasses.replace(
+        _hook(),
+        heard=True,
+        heard_kind=sim.NOISE_GUNFIRE,
+        heard_relative=(300.0, 100.0, 32.0),
+        heard_age=2.5,
+    )
+    obs = monster.MonsterObserver().observe(hook)
+    distance = math.hypot(300.0, 100.0)
+    assert obs[119] == pytest.approx(300.0 / distance)  # ahead
+    assert obs[120] == pytest.approx(100.0 / distance)  # left: the monster faces +x
+    assert obs[121] == pytest.approx(32.0 / 256.0)
+    assert obs[122] == pytest.approx(distance / 1024.0)
+    assert obs[123] == pytest.approx(2.5 / sim.HOOK_HEARD_SECONDS)
+    assert obs[124] == 1.0
+    # A noise is not a sighting: the last-seen place stays unset.
+    assert obs[109:115].tolist() == [0.0] * 6
+
+    # The bearing is in the monster's frame: turned 90 degrees, the noise
+    # is mostly to its right.
+    turned = monster.MonsterObserver().observe(dataclasses.replace(hook, angles=(0.0, 90.0, 0.0)))
+    assert turned[119] == pytest.approx(100.0 / distance)
+    assert turned[120] == pytest.approx(-300.0 / distance)
+    assert turned[121:125].tolist() == obs[121:125].tolist()
+
+    # Not heard any more: nothing is said about it, whatever is left in the fields.
+    forgotten = monster.MonsterObserver().observe(dataclasses.replace(hook, heard=False))
+    assert forgotten[119:125].tolist() == [0.0] * 6
+
+
+def test_heard_kind_is_not_in_the_observation():
+    """What kind of noise it was never reaches the policy."""
+    heard = dataclasses.replace(
+        _hook(), heard=True, heard_relative=(200.0, 0.0, 0.0), heard_age=0.5
+    )
+    vectors = [
+        monster.MonsterObserver().observe(dataclasses.replace(heard, heard_kind=kind))
+        for kind in (sim.NOISE_GUNFIRE, sim.NOISE_EXPLOSION, sim.NOISE_CRY, sim.NOISE_PLAYER)
+    ]
+    for other in vectors[1:]:
+        np.testing.assert_array_equal(vectors[0], other)
+
+
+def test_health_is_a_fraction_of_start_health():
+    """Health is read against the monster's own health when nominated, so a
+    Grunt at 30 of 60 and a Shambler at 300 of 600 both read one half."""
+    grunt = monster.MonsterObserver().observe(
+        dataclasses.replace(_hook(health=30.0), start_health=60.0)
+    )
+    shambler = monster.MonsterObserver(monster_type="monster_shambler").observe(
+        dataclasses.replace(_hook(health=300.0), start_health=600.0)
+    )
+    assert grunt[100] == pytest.approx(0.5)
+    assert shambler[100] == pytest.approx(0.5)
+    # Clipped to [0, 1].
+    over = monster.MonsterObserver().observe(dataclasses.replace(_hook(health=150.0)))
+    below = monster.MonsterObserver().observe(dataclasses.replace(_hook(health=-5.0)))
+    assert over[100] == 1.0 and below[100] == 0.0
+    # A report with no start health divides by 100.
+    plain = monster.MonsterObserver().observe(_hook(start_health=0.0))
+    assert plain[100] == pytest.approx(0.8)
+
+
+def test_nearest_ally_channels():
+    """The nearest visible live monster other than itself, and how many there are."""
+    near, far = _monster((150.0, 0.0, 8.0), index=20), _monster((0.0, -400.0, 0.0), index=21)
+    dead = _monster((50.0, 0.0, 0.0), health=0.0, index=22)
+    obs = monster.MonsterObserver().observe(_hook(visible=(_client(), near, far, dead)))
+    assert obs[128] == pytest.approx(1.0) and obs[129] == pytest.approx(0.0)
+    assert obs[130] == pytest.approx(150.0 / 1024.0)
+    # The player and the dead monster are not allies.
+    assert obs[131] == pytest.approx(2.0 / 4.0)
+
+    # In the monster's frame: facing +y, the far monster is straight behind.
+    turned = monster.MonsterObserver().observe(
+        dataclasses.replace(_hook(visible=(far,)), angles=(0.0, 90.0, 0.0))
+    )
+    assert turned[128] == pytest.approx(-1.0) and turned[129] == pytest.approx(0.0)
+    assert turned[130] == pytest.approx(400.0 / 1024.0)
+    assert turned[131] == pytest.approx(0.25)
+
+    # Itself, should the hook ever list it, is not its own nearest ally.
+    itself = _monster((10.0, 0.0, 0.0), index=12)
+    own = monster.MonsterObserver().observe(_hook(visible=(itself, far)))
+    assert own[130] == pytest.approx(400.0 / 1024.0)
+    assert own[131] == pytest.approx(0.25)
+
+    # None in sight: nothing is said.
+    none = monster.MonsterObserver().observe(_hook(visible=(_client(),)))
+    assert none[128:132].tolist() == [0.0] * 4
+
+
+def test_pace_one_hot():
+    """The pace the hook moves the monster at, one-hot: walk, investigate, run."""
+    for pace, expected in (
+        (sim.PACE_WALK, [1.0, 0.0, 0.0]),
+        (sim.PACE_INVESTIGATE, [0.0, 1.0, 0.0]),
+        (sim.PACE_RUN, [0.0, 0.0, 1.0]),
+    ):
+        obs = monster.MonsterObserver().observe(dataclasses.replace(_hook(), pace=pace))
+        assert obs[125:128].tolist() == expected
+    # A pace outside the three lights nothing, rather than guessing.
+    unknown = monster.MonsterObserver().observe(dataclasses.replace(_hook(), pace=7))
+    assert unknown[125:128].tolist() == [0.0, 0.0, 0.0]
 
 
 def test_deterministic_for_identical_inputs():
@@ -308,7 +441,7 @@ def test_the_dog_gets_its_own_type_input():
     assert out["classname"] == "monster_dog"
     assert out["hooked"] == out["index"]  # the hook report came from that Dog
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 ENFORCER_EPISODE = """
@@ -341,7 +474,7 @@ def test_the_enforcer_gets_its_own_type_input():
     assert out["classname"] == "monster_enforcer"
     assert out["hooked"] == out["index"]  # the hook report came from that Enforcer
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 OGRE_EPISODE = """
@@ -373,7 +506,7 @@ def test_the_ogre_gets_its_own_type_input():
     assert out["classname"] == "monster_ogre"
     assert out["hooked"] == out["index"]  # the hook report came from that Ogre
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 HELL_KNIGHT_EPISODE = """
@@ -405,7 +538,7 @@ def test_the_hell_knight_gets_its_own_type_input():
     assert out["classname"] == "monster_hell_knight"
     assert out["hooked"] == out["index"]  # the hook report came from that Hell Knight
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 SHALRATH_EPISODE = """
@@ -442,7 +575,7 @@ def test_the_shalrath_gets_its_own_type_input():
     assert out["classname"] == "monster_shalrath"
     assert out["hooked"] == out["index"]  # the hook report came from that Shalrath
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
 
 
 KNIGHT_EPISODE = """
@@ -474,7 +607,7 @@ def test_the_knight_gets_its_own_type_input():
     assert out["classname"] == "monster_knight"
     assert out["hooked"] == out["index"]  # the hook report came from that Knight
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
 
 FIEND_EPISODE = """
@@ -506,7 +639,7 @@ def test_the_fiend_gets_its_own_type_input():
     assert out["classname"] == "monster_demon1"
     assert out["hooked"] == out["index"]  # the hook report came from that Fiend
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 
 
 SHAMBLER_EPISODE = """
@@ -543,7 +676,7 @@ def test_the_shambler_gets_its_own_type_input():
     assert out["classname"] == "monster_shambler"
     assert out["hooked"] == out["index"]  # the hook report came from that Shambler
     assert out["shape"] == [monster.MONSTER_OBS_DIM]
-    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    assert out["type"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 
 
 NO_ENFORCER_EPISODES = """
